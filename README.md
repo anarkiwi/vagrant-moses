@@ -51,7 +51,6 @@ vagrant-moses media extract dl/ -o prg/                 # prints sha256 size $lo
 ## Docs
 
 - [The machine model: memory map, bus, ROMs, chips, machine, KERNAL and IRQ dispatch](docs/c64.md)
-- [Migrating pysidtracker's machine code](docs/migration.md)
 - [Release media: nested containers, disk geometries, tapes, and the CLI](docs/media.md)
 
 ## Develop
