@@ -7,10 +7,12 @@ ROM-free IRQ dispatch path that makes a handler entry a subroutine call.
 
 from __future__ import annotations
 
-IRQ_VEC = (0x0314, 0x0315)  # CINV (KERNAL A/X/Y-save ABI)
-NMI_VEC = (0x0318, 0x0319)  # NMINV
-HW_IRQ_VEC = (0xFFFE, 0xFFFF)  # hardware IRQ/BRK vector
-HW_NMI_VEC = (0xFFFA, 0xFFFB)  # hardware NMI vector
+from . import memmap as mm
+
+IRQ_VEC = (mm.RAM_IRQ_VECTOR_LO, mm.RAM_IRQ_VECTOR_HI)  # CINV (KERNAL A/X/Y save)
+NMI_VEC = (mm.RAM_NMI_VECTOR_LO, mm.RAM_NMI_VECTOR_HI)  # NMINV
+HW_IRQ_VEC = (mm.CPU_IRQ_VECTOR, mm.CPU_IRQ_VECTOR + 1)  # hardware IRQ/BRK vector
+HW_NMI_VEC = (mm.CPU_NMI_VECTOR, mm.CPU_NMI_VECTOR + 1)  # hardware NMI vector
 
 # KERNAL IRQ epilogue: PLA;TAY;PLA;TAX;PLA;RTI ($EA81, NMI $FEBC)
 _EPILOGUE = bytes((0x68, 0xA8, 0x68, 0xAA, 0x68, 0x40))
@@ -28,8 +30,8 @@ _P_IRQ = 0x20  # interrupted-program status pushed for the RTI (I clear)
 def poweron_ram():
     """C64 power-on RAM fill (libsidplayfp ``SystemRAMBank::reset``), as bytes.
 
-    Each 16 KiB block alternates 0x00/0xFF, with 4-byte stripes of the opposite
-    value every 8 bytes from offset 2; never-written RAM reads these on hardware.
+    Each quarter of RAM alternates 0x00/0xFF, with stripes of four opposite bytes
+    every eight from offset 2; never-written RAM reads these on hardware.
     """
     ram = bytearray(0x10000)
     byte = 0x00
@@ -66,6 +68,17 @@ def installed_handler(mem, written, img):
     """Installed interrupt handler ``(addr, uses_kernal_cinv)``, or ``None``."""
     found = installed_vector(mem, written, img)
     return None if found is None else (read_vector(mem, found[0]), found[1])
+
+
+def dispatch_vector(bits, nmi):
+    """``(vector, saves_registers)`` an IRQ or NMI is dispatched through.
+
+    With the KERNAL banked in (``bits & HIRAM``) its IRQ entry saves A/X/Y and
+    jumps through CINV, its NMI entry through NMINV; else the CPU vector is it.
+    """
+    if bits & mm.HIRAM:
+        return (NMI_VEC[0], False) if nmi else (IRQ_VEC[0], True)
+    return (HW_NMI_VEC[0] if nmi else HW_IRQ_VEC[0]), False
 
 
 def install_kernal_irq_stubs(vm):

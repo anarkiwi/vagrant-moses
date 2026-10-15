@@ -10,11 +10,12 @@ from __future__ import annotations
 from typing import Callable
 
 from .eventsched import PHI1, Event, Scheduler
+from .memmap import NTSC, PAL
 
 FIRST_DMA_LINE, LAST_DMA_LINE = 0x30, 0xF7
 _FETCH_CYCLE, _TEXT_COLS = 11, 40
 _IRQ_RASTER = 1
-PAL_GEOMETRY, NTSC_GEOMETRY = (312, 63), (263, 65)
+PAL_GEOMETRY, NTSC_GEOMETRY = PAL.geometry, NTSC.geometry
 
 
 class Sprites:
@@ -190,7 +191,7 @@ class Vic:
         sched.schedule(self.event, delay - phase, PHI1)
 
     def sync(self) -> None:
-        """Catch the beam up to now (a CPU access)."""
+        """Advance the beam to the current cycle (a CPU access)."""
         self.sched.cancel(self.event)
         self._event()
 

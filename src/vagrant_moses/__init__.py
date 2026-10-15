@@ -1,7 +1,7 @@
 """vagrant_moses -- a standalone C64 machine model.
 
-VIC-II and CIA volatile I/O models, the two-phase event scheduler they share, and
-the power-on RAM, interrupt-vector discovery, ROM-free IRQ dispatch path, and native
+The memory map, the $01-banked bus and ROMs, the VIC-II and CIAs over a two-phase
+scheduler, a cycle-exact machine, KERNAL traps, the IRQ dispatch helpers and native
 release-media extraction. The SID audio model and all SID-file knowledge are
 deliberately not here.
 """
@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import c64, cia, eventsched, media, vicii
+from . import bus, c64, cia, cpu, eventsched, kernal, machine, media, memmap, roms
+from . import vicii
+from .bus import Bus
 from .c64 import (
     IRQ_VEC,
     NMI_VEC,
@@ -26,10 +28,15 @@ from .c64 import (
     install_kernal_irq_stubs,
     irq_stubs,
     install_irq_entry,
+    dispatch_vector,
 )
 from .cia import Cia, InterruptSource, Timer
 from .media import MediaError, MediaFile, iter_prgs, read_disk, read_t64
 from .eventsched import Event, PHI1, PHI2, Scheduler
+from .kernal import KernalHost, KernalHostError, sys_addr
+from .machine import Machine, boot_cycle
+from .memmap import NTSC, PAL, Video
+from .roms import RomFetchError, kernal_stub
 from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
 
 try:
@@ -38,9 +45,15 @@ except PackageNotFoundError:  # pragma: no cover - source tree without install m
     __version__ = "0+unknown"
 
 __all__ = [
+    "bus",
     "c64",
     "cia",
+    "cpu",
     "eventsched",
+    "kernal",
+    "machine",
+    "memmap",
+    "roms",
     "vicii",
     "media",
     "MediaError",
@@ -48,6 +61,18 @@ __all__ = [
     "iter_prgs",
     "read_disk",
     "read_t64",
+    "Bus",
+    "dispatch_vector",
+    "KernalHost",
+    "KernalHostError",
+    "sys_addr",
+    "Machine",
+    "boot_cycle",
+    "PAL",
+    "NTSC",
+    "Video",
+    "RomFetchError",
+    "kernal_stub",
     "IRQ_VEC",
     "NMI_VEC",
     "HW_IRQ_VEC",
