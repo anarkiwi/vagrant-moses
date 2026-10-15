@@ -1,14 +1,15 @@
 """vagrant_moses -- a standalone C64 machine model.
 
-Power-on RAM, interrupt-vector discovery, and the ROM-free IRQ dispatch path a
-host needs to enter a tune's playroutine faithfully. See :mod:`vagrant_moses.c64`.
+VIC-II and CIA volatile I/O models, the two-phase event scheduler they share, and
+the power-on RAM, interrupt-vector discovery, and ROM-free IRQ dispatch path. The
+SID audio model and all SID-file knowledge are deliberately not here.
 """
 
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import c64
+from . import c64, cia, eventsched, vicii
 from .c64 import (
     IRQ_VEC,
     NMI_VEC,
@@ -25,6 +26,9 @@ from .c64 import (
     irq_stubs,
     install_irq_entry,
 )
+from .cia import Cia, InterruptSource, Timer
+from .eventsched import Event, PHI1, PHI2, Scheduler
+from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
 
 try:
     __version__ = version("vagrant-moses")
@@ -33,6 +37,9 @@ except PackageNotFoundError:  # pragma: no cover - source tree without install m
 
 __all__ = [
     "c64",
+    "cia",
+    "eventsched",
+    "vicii",
     "IRQ_VEC",
     "NMI_VEC",
     "HW_IRQ_VEC",
@@ -47,5 +54,16 @@ __all__ = [
     "install_kernal_irq_stubs",
     "irq_stubs",
     "install_irq_entry",
+    "Cia",
+    "Timer",
+    "InterruptSource",
+    "Event",
+    "Scheduler",
+    "PHI1",
+    "PHI2",
+    "Vic",
+    "Sprites",
+    "PAL_GEOMETRY",
+    "NTSC_GEOMETRY",
     "__version__",
 ]

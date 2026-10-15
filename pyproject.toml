@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vagrant-moses"
-version = "0.1.0"
-description = "Standalone C64 machine model: power-on RAM, interrupt-vector discovery, and the ROM-free IRQ dispatch path"
+version = "0.2.0"
+description = "Standalone C64 machine model: VIC-II and CIA volatile I/O over a two-phase event scheduler, power-on RAM, interrupt-vector discovery, and the ROM-free IRQ dispatch path"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
