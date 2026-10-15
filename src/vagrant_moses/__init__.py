@@ -1,15 +1,16 @@
 """vagrant_moses -- a standalone C64 machine model.
 
 VIC-II and CIA volatile I/O models, the two-phase event scheduler they share, and
-the power-on RAM, interrupt-vector discovery, and ROM-free IRQ dispatch path. The
-SID audio model and all SID-file knowledge are deliberately not here.
+the power-on RAM, interrupt-vector discovery, ROM-free IRQ dispatch path, and native
+release-media extraction. The SID audio model and all SID-file knowledge are
+deliberately not here.
 """
 
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import c64, cia, eventsched, vicii
+from . import c64, cia, eventsched, media, vicii
 from .c64 import (
     IRQ_VEC,
     NMI_VEC,
@@ -27,6 +28,7 @@ from .c64 import (
     install_irq_entry,
 )
 from .cia import Cia, InterruptSource, Timer
+from .media import MediaError, MediaFile, iter_prgs, read_disk, read_t64
 from .eventsched import Event, PHI1, PHI2, Scheduler
 from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
 
@@ -40,6 +42,12 @@ __all__ = [
     "cia",
     "eventsched",
     "vicii",
+    "media",
+    "MediaError",
+    "MediaFile",
+    "iter_prgs",
+    "read_disk",
+    "read_t64",
     "IRQ_VEC",
     "NMI_VEC",
     "HW_IRQ_VEC",

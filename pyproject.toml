@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vagrant-moses"
-version = "0.2.0"
-description = "Standalone C64 machine model: VIC-II and CIA volatile I/O over a two-phase event scheduler, power-on RAM, interrupt-vector discovery, and the ROM-free IRQ dispatch path"
+version = "0.3.0"
+description = "Standalone C64 machine model: VIC-II and CIA volatile I/O over a two-phase event scheduler, power-on RAM, interrupt-vector discovery, the ROM-free IRQ dispatch path, and native d64/d71/d81/t64 media extraction"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Josh Bailey" }]
-keywords = ["c64", "6510", "mos6510", "c64k", "irq", "interrupt", "sid", "retrocomputing"]
+keywords = ["c64", "6510", "mos6510", "c64k", "irq", "interrupt", "sid", "retrocomputing", "d64", "d81", "t64"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
@@ -19,11 +19,15 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Emulators",
 ]
-# No runtime dependencies: pure Python over a writable 64 KiB memory buffer.
 dependencies = []
 
+[project.scripts]
+vagrant-moses = "vagrant_moses.cli:main"
+
 [project.optional-dependencies]
+cli = ["tqdm>=4"]
 dev = [
+    "tqdm>=4",
     "black>=24",
     "pylint>=3",
     "pytest>=7",
