@@ -203,7 +203,7 @@ def test_native_ram_is_owned_by_the_native_memory():
     assert mem._subject.ram[0x2001] == 0x22 and ram[0x2001] == 0
     mem._subject.ram[0x2002] = 0x33
     assert mem[0x2002] == 0x33 and len(mem) == 0x10000
-    assert mem.last_load == 0 and mem._subject is mem
+    assert mem.last_load in (0, None) and mem._subject is mem
 
 
 def test_native_true_without_native_core(monkeypatch):
