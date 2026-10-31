@@ -315,16 +315,14 @@ def _cut(run_: Run, t_cut: int) -> Run:
 
 
 def _risky(pc: int) -> bool:
-    """The instruction at ``pc`` reads a byte whose read has side effects.
+    """The instruction at ``pc`` has a byte fetched from the I/O page.
 
-    The Python engine reads an instruction's bytes several times, by its cache state;
-    that differs from the native single read only for the open bus (``$DE00-$DFFF``)
-    and the CIA ICR (``$DC0D``/``$DD0D``, mirrored).
+    The Python engine reads an instruction's bytes several times, by its cache state:
+    the open bus advances, a CIA ICR read clears, and the last value read, which an
+    RMW instruction writes back first, is the last byte re-read. The native machine
+    reads each byte once; the two agree on code in RAM and ROM.
     """
-    return any(
-        0xDE00 <= a < 0xE000 or (0xDC00 <= a < 0xDE00 and a & 0xF == 0xD)
-        for a in range(pc, pc + 3)
-    )
+    return any(0xD000 <= a < 0xE000 for a in range(pc, pc + 3))
 
 
 def _io_fetch(run_: Run) -> int:

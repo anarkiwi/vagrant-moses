@@ -51,9 +51,11 @@ attribute access; independent machines run in parallel.
 
 The Python machine runs jennings' Python engine, which re-reads an instruction's bytes
 several times by its cache state. The native machine reads each byte once. The two agree
-except when an instruction is fetched from a register whose read has side effects (the
-open bus at `$DE00-$DFFF`, the CIA ICR); `tests/machine_diff.py` ends its comparison at
-the first such fetch.
+for code in RAM and ROM, and for data accesses anywhere. They differ only for an
+instruction fetched from `$D000-$DFFF` with I/O mapped, where a re-read has an effect: the
+open bus advances, a CIA ICR read clears, and the last value read (which an RMW
+instruction writes back first) is the last byte re-read. `tests/machine_diff.py` ends its
+comparison at the first such fetch.
 
 ## Verification
 
