@@ -128,6 +128,11 @@ def test_dispatch_vector_follows_the_kernal_banking(bits, nmi, want):
     assert c64.dispatch_vector(bits, nmi) == want
 
 
+@pytest.fixture(params=[False, True], ids=["python", "native"])
+def native(request):
+    return request.param
+
+
 def _flat(code, **kwargs):
     ram = bytearray(0x10000)
     ram[0], ram[1] = mm.DDR_DEFAULT, mm.BANK_DEFAULT
@@ -135,8 +140,8 @@ def _flat(code, **kwargs):
     return ram, *flat_mpu(ram, **kwargs)
 
 
-def test_flat_raster_reads_follow_the_cycle_counter():
-    ram, mpu, mem = _flat([0xAD, 0x12, 0xD0])  # LDA $D012
+def test_flat_raster_reads_follow_the_cycle_counter(native):
+    _, mpu, mem = _flat([0xAD, 0x12, 0xD0], native=native)  # LDA $D012
     seen = set()
     for _ in range(8):
         mpu.pc = CODE
@@ -145,31 +150,67 @@ def test_flat_raster_reads_follow_the_cycle_counter():
         mpu.processorCycles += mm.PAL.cycles_per_line
     assert len(seen) == 8
     mpu.processorCycles = 300 * mm.PAL.cycles_per_line
-    ram[0xD011] = 0x1B
+    mem._subject.ram[0xD011] = 0x1B
     assert mem[0xD011] == 0x9B and mem[0xD012] == 300 & 0xFF
     mem[1] = 0x34
     assert mem[0xD011] == 0x1B  # RAM under the I/O page
 
 
-def test_flat_ntsc_beam_wraps_at_263_lines():
-    _, mpu, mem = _flat([], ntsc=True)
+def test_flat_ntsc_beam_wraps_at_263_lines(native):
+    _, mpu, mem = _flat([], ntsc=True, native=native)
     mpu.processorCycles = 263 * mm.NTSC.cycles_per_line
     assert mem[0xD012] == 0
 
 
-def test_run_to_rts_returns_and_honours_the_cap():
-    _, mpu, mem = _flat([0xA9, 0x5C, 0x8D, 0x43, 0x00, 0x60])  # LDA #; STA $43; RTS
+def test_run_to_rts_returns_and_honours_the_cap(native):
+    _, mpu, mem = _flat(
+        [0xA9, 0x5C, 0x8D, 0x43, 0x00, 0x60], native=native
+    )  # LDA #; STA $43; RTS
     run_to_rts(mpu, mem, CODE, 7, max_cycles=1000)
     assert mem[0x43] == 0x5C and mpu.sp == 0xFF
-    _, mpu, mem = _flat([0x4C, CODE & 0xFF, CODE >> 8])  # JMP *
+    _, mpu, mem = _flat([0x4C, CODE & 0xFF, CODE >> 8], native=native)  # JMP *
     run_to_rts(mpu, mem, CODE, 0, max_cycles=1000)
     assert 1000 < mpu.processorCycles < 1010
 
 
-def test_access_cycle_is_the_last_cycle_of_the_instruction():
-    _, mpu, _ = _flat([0x8D, 0x00, 0xD4])  # STA $D400: 4 cycles
+def test_access_cycle_is_the_last_cycle_of_the_instruction(native):
+    _, mpu, _ = _flat([0x8D, 0x00, 0xD4], native=native)  # STA $D400: 4 cycles
     mpu.pc, mpu.processorCycles = CODE, 100
     assert access_cycle(mpu) == 103
+
+
+def test_flat_mpu_banks_roms_through_the_port(native):
+    ram = _shadowed()
+    ram[0], ram[1] = mm.DDR_DEFAULT, mm.BANK_DEFAULT
+    mpu, mem = flat_mpu(ram, native=native)
+    assert type(mpu).__name__ == ("NativeMPU" if native else "MPU")
+    bus = mem._subject
+    assert bus.bits == 7 and bus.io and mem[1] == mm.BANK_DEFAULT
+    assert mem[0xE000] == kernal_stub()[0] and mem[0xA000] != 0xAB
+    mem[1] = 0x34
+    assert not bus.io and (mem[0xE000], mem[0xA000], mem[0xD000]) == (0xCD, 0xAB, 0xEF)
+    assert mem[1] == 0x34 | 0x10 and bus.ram[1] == 0x34
+    mem[0], mem[1] = 0x00, 0x00
+    assert bus.bits == 7 and mem[1] == port_read(0, 0)
+
+
+def test_native_ram_is_owned_by_the_native_memory():
+    ram = bytearray(0x10000)
+    ram[0x2000] = 0x11
+    _, mem = flat_mpu(ram, native=True)
+    assert mem[0x2000] == 0x11 and mem._subject.ram[0x2000] == 0x11
+    mem[0x2001] = 0x22
+    assert mem._subject.ram[0x2001] == 0x22 and ram[0x2001] == 0
+    mem._subject.ram[0x2002] = 0x33
+    assert mem[0x2002] == 0x33 and len(mem) == 0x10000
+    assert mem.last_load == 0 and mem._subject is mem
+
+
+def test_native_true_without_native_core(monkeypatch):
+    monkeypatch.setattr("jennings.memory.NATIVE", False)
+    with pytest.raises(ImportError, match="native core"):
+        flat_mpu(bytearray(0x10000), native=True)
+    assert type(flat_mpu(bytearray(0x10000))[0]).__name__ == "MPU"
 
 
 def test_flat_mpu_needs_the_cpu_extra(monkeypatch):
