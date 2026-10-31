@@ -11,10 +11,18 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from . import memmap as mm
 from .bus import Bus
+from .c64 import poweron_ram
+from .roms import rom_less
 from .cia import Cia
 from .eventsched import PHI1, Event, Scheduler
 from .vicii import Vic
 
+try:
+    from . import _core
+except ImportError:  # no wheel for this platform: the Python machine only
+    _core = None
+
+NATIVE = _core is not None
 _MAX = 65536
 # Entry kinds of libsidplayfp's per-opcode cycle tables; those below R write.
 W, PUSHPCH, LOWPC, PUSHSR = range(4)
@@ -136,6 +144,36 @@ def _layouts():
     return out
 
 
+_KINDS = {"": 0, "rmw": 1, "absx": 2, "absy": 3, "indy": 4, "branch": 5}
+
+
+def _native_layouts():
+    """``Machine.LAYOUTS`` as the native machine takes it, then ``BRK_ENTRIES`` last."""
+    if Machine.LAYOUTS is None:
+        Machine.LAYOUTS = _layouts()
+    return [
+        (
+            list(ents),
+            exec_at,
+            _KINDS[kind],
+            base,
+            branch and (branch[0], bool(branch[1])),
+        )
+        for ents, exec_at, kind, base, branch in Machine.LAYOUTS
+    ]
+
+
+def _rom_images():
+    """BASIC, CHARGEN and KERNAL as 64 KiB images, as :class:`~vagrant_moses.bus.Bus` keeps them."""
+    roms = rom_less()
+    images = []
+    for base in (mm.BASIC_BASE, mm.CHARGEN_BASE, mm.KERNAL_BASE):
+        image = bytearray(0x10000)
+        image[base : base + len(roms[base])] = roms[base]
+        images.append(bytes(image))
+    return tuple(images)
+
+
 def boot_cycle(ntsc: bool) -> int:
     """The cycle sidplayfp's CPU first runs: after its fixed power-on event count.
 
@@ -166,13 +204,46 @@ class Machine(Bus):
 
     LAYOUTS = None
 
+    def __new__(
+        cls,
+        ntsc: bool = False,
+        sids: Optional[Dict[int, object]] = None,
+        cia_new: bool = False,
+        on_event: Optional[Callable[[int, str], None]] = None,
+        backend: Optional[str] = None,
+        **_kwargs,
+    ):
+        """The native machine for ``backend="native"`` (the default when ``_core``
+        imports), else this pure-Python reference; subclasses are always Python."""
+        if backend not in (None, "native", "python"):
+            raise ValueError(f"backend must be 'native' or 'python', got {backend!r}")
+        if backend == "native" and not NATIVE:
+            raise ImportError("vagrant_moses._core is not built")
+        if cls is not Machine or backend == "python" or not NATIVE:
+            return super().__new__(cls)
+        _jennings()
+        lines, cycles_per_line = mm.video(ntsc).geometry
+        return _core.Machine(
+            ntsc,
+            dict(sids or {}),
+            cia_new,
+            on_event,
+            _native_layouts(),
+            bytes(poweron_ram()),
+            _rom_images(),
+            lines,
+            cycles_per_line,
+        )
+
     def __init__(
         self,
         ntsc: bool = False,
         sids: Optional[Dict[int, object]] = None,
         cia_new: bool = False,
         on_event: Optional[Callable[[int, str], None]] = None,
+        backend: Optional[str] = None,
     ):
+        del backend
         mpu_cls = _jennings()[0]
         if Machine.LAYOUTS is None:
             Machine.LAYOUTS = _layouts()
@@ -490,6 +561,7 @@ class Machine(Bus):
 
 
 __all__ = [
+    "NATIVE",
     "BRK_ENTRIES",
     "FETCHES",
     "Machine",
