@@ -720,6 +720,20 @@ macro_rules! registers {
                 }
             )*
 
+            /// Cycles of the instructions executed (`MPU.processorCycles`).
+            #[getter]
+            #[allow(non_snake_case)]
+            fn processorCycles(&self) -> PyResult<u64> {
+                Ok(self.machine.get().core()?.cpu.cycles)
+            }
+
+            #[setter]
+            #[allow(non_snake_case)]
+            fn set_processorCycles(&self, v: u64) -> PyResult<()> {
+                self.machine.get().core()?.cpu.cycles = v;
+                Ok(())
+            }
+
             #[getter]
             fn p(&self) -> PyResult<u8> {
                 Ok(self.machine.get().core()?.cpu.p())

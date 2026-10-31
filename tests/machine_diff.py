@@ -227,7 +227,17 @@ def program(seed: int):
 def _snapshot(trace, machine):
     mpu = machine.mpu
     trace.extend(
-        (machine.t, mpu.pc, mpu.a, mpu.x, mpu.y, mpu.sp, mpu.p, machine.port_data)
+        (
+            machine.t,
+            mpu.pc,
+            mpu.a,
+            mpu.x,
+            mpu.y,
+            mpu.sp,
+            mpu.p,
+            machine.port_data,
+            mpu.processorCycles,
+        )
     )
 
 
@@ -293,10 +303,10 @@ def run(seed: int, cycles: int, backend: str) -> Run:
 
 def _cut(run_: Run, t_cut: int) -> Run:
     """``run_`` up to cycle ``t_cut`` (the first risky fetch)."""
-    rows = len(run_.trace) // 8
-    n = next((i for i in range(rows) if run_.trace[8 * i] >= t_cut), rows)
+    rows = len(run_.trace) // 9
+    n = next((i for i in range(rows) if run_.trace[9 * i] >= t_cut), rows)
     return Run(
-        run_.trace[: 8 * n],
+        run_.trace[: 9 * n],
         [e for e in run_.events if e[0] < t_cut],
         [w for w in run_.sid if w[0] < t_cut],
         [c for c in run_.traps if c[0] < t_cut],
@@ -319,9 +329,9 @@ def _risky(pc: int) -> bool:
 
 def _io_fetch(run_: Run) -> int:
     """The cycle of the first risky fetch, else a huge cycle."""
-    pcs = run_.trace[1::8]
+    pcs = run_.trace[1::9]
     at = next((i for i, pc in enumerate(pcs) if _risky(pc)), None)
-    return 1 << 62 if at is None else run_.trace[8 * at]
+    return 1 << 62 if at is None else run_.trace[9 * at]
 
 
 def first_divergence(a: Run, b: Run) -> Optional[str]:
@@ -337,12 +347,12 @@ def first_divergence(a: Run, b: Run) -> Optional[str]:
             at = next((i for i, (x, y) in enumerate(zip(xs, ys)) if x != y), None)
             return f"{name} differ at {at}: {len(xs)} vs {len(ys)}"
     if a.trace != b.trace:
-        rows = min(len(a.trace), len(b.trace)) // 8
+        rows = min(len(a.trace), len(b.trace)) // 9
         for i in range(rows):
-            x, y = a.trace[8 * i : 8 * i + 8], b.trace[8 * i : 8 * i + 8]
+            x, y = a.trace[9 * i : 9 * i + 9], b.trace[9 * i : 9 * i + 9]
             if x != y:
                 return f"trace differs at instruction {i}: {list(x)} vs {list(y)}"
-        return f"trace lengths {len(a.trace) // 8} vs {len(b.trace) // 8}"
+        return f"trace lengths {len(a.trace) // 9} vs {len(b.trace) // 9}"
     return None
 
 
