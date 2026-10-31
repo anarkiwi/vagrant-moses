@@ -80,3 +80,12 @@ enable = [
     "using-constant-test",
     "raise-missing-from",
 ]
+
+# Wheels carry the native machine: `maturin build --release` (CI) or `maturin develop`.
+# The sdist builds with setuptools above and installs the pure-Python machine only.
+[tool.maturin]
+manifest-path = "crates/moses-py/Cargo.toml"
+module-name = "vagrant_moses._core"
+python-source = "src"
+python-packages = ["vagrant_moses"]
+features = ["pyo3/extension-module"]
