@@ -12,6 +12,7 @@ import pytest
 from vagrant_moses import machine as vm
 from vagrant_moses import memmap as mm
 from vagrant_moses.machine import BR, X2, Machine, boot_cycle, opcode_layout
+from vagrant_moses.sid import PyNativeSid
 
 from asm import assemble
 
@@ -27,6 +28,18 @@ def backend(request, monkeypatch):
         sys.modules[__name__],
         "Machine",
         functools.partial(Machine, backend=request.param),
+    )
+    return request.param
+
+
+SID_KINDS = ["device", "pure"] + ["native"] * vm.NATIVE
+
+
+@pytest.fixture(autouse=True, params=SID_KINDS)
+def sid_kind(request, monkeypatch):
+    """Run every test with a Python SID device, then with each NativeSid."""
+    monkeypatch.setattr(
+        sys.modules[__name__], "make_sid", functools.partial(_make_sid, request.param)
     )
     return request.param
 
@@ -55,6 +68,10 @@ class Sid:
     def __init__(self, value=0):
         self.writes, self.value = [], value
 
+    @property
+    def dev(self):
+        return self
+
     def read(self, _cycle, register):
         return self.value | register
 
@@ -62,9 +79,34 @@ class Sid:
         self.writes.append((cycle, register, value))
 
 
+class Logged:
+    """A NativeSid whose chip answers like ``Sid`` and whose log reads like ``Sid.writes``."""
+
+    def __init__(self, cls, value=0):
+        self.value, self.log = value, []
+        self.dev = cls("6581", self.on_read)
+
+    def on_read(self, _cycle, register):
+        return self.value | register
+
+    @property
+    def writes(self):
+        self.log += self.dev.drain_writes()
+        return self.log
+
+
+def _make_sid(kind, value=0):
+    if kind == "device":
+        return Sid(value)
+    return Logged(PyNativeSid if kind == "pure" else vm.NativeSid, value)
+
+
+make_sid = _make_sid
+
+
 def _boot(src, seconds=0.25, **kwargs):
-    sid = Sid()
-    machine = Machine(sids={mm.SID_BASE: sid}, **kwargs)
+    sid = make_sid()
+    machine = Machine(sids={mm.SID_BASE: sid.dev}, **kwargs)
     code, labels = assemble(src, ORG)
     machine.ram[ORG : ORG + len(code)] = code
     start = machine.reset(ORG)
@@ -390,8 +432,8 @@ loop: JMP loop
 
 
 def test_an_extra_sid_at_io1_takes_its_slot():
-    extra = Sid(value=0x40)
-    machine = Machine(sids={mm.SID_BASE: Sid(), mm.IO1_BASE: extra})
+    extra = make_sid(value=0x40)
+    machine = Machine(sids={mm.SID_BASE: make_sid().dev, mm.IO1_BASE: extra.dev})
     code, _ = assemble(
         "  LDA #$09\n  STA $DE04\n  LDA $DE1B\n  STA $C000\nl: JMP l\n", ORG
     )

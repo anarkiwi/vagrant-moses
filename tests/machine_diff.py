@@ -16,7 +16,9 @@ from typing import NamedTuple, Optional
 from jennings.opcodes import OPCODES
 
 from vagrant_moses import memmap as mm
+from vagrant_moses import machine as vm
 from vagrant_moses.machine import Machine, boot_cycle
+from vagrant_moses.sid import PyNativeSid
 
 from asm import assemble
 
@@ -241,10 +243,17 @@ def _snapshot(trace, machine):
     )
 
 
-def run(seed: int, cycles: int, backend: str) -> Run:
-    """Run program ``seed`` for ``cycles`` cycles on ``backend``."""
+def run(seed: int, cycles: int, backend: str, logged: bool = False) -> Run:
+    """Run program ``seed`` for ``cycles`` cycles on ``backend``.
+
+    ``logged`` puts a NativeSid in front of the chip: the pure-Python one on the Python
+    machine, the native one on the native machine.
+    """
     ntsc, cia_new, writes, watch = program(seed)
     trace, traps, sid = array("q"), [], Sid()
+    dev = sid
+    if logged:
+        dev = (PyNativeSid if backend == "python" else vm.NativeSid)("6581", sid.read)
     calls = {}
 
     def trap(machine):
@@ -273,7 +282,7 @@ def run(seed: int, cycles: int, backend: str) -> Run:
     if backend == "python":
         machine = RefMachine(
             ntsc,
-            {mm.SID_BASE: sid},
+            {mm.SID_BASE: dev},
             cia_new,
             backend="python",
             trap=trap,
@@ -282,7 +291,7 @@ def run(seed: int, cycles: int, backend: str) -> Run:
         machine.idle = SOUP
         machine.WATCH_ALL = _ALL
     else:
-        machine = Machine(ntsc, {mm.SID_BASE: sid}, cia_new, backend="native")
+        machine = Machine(ntsc, {mm.SID_BASE: dev}, cia_new, backend="native")
         machine.set_trap(trap, frozenset())
         machine.arm_at(SOUP)
         machine.on_port_write(port_write)
@@ -298,7 +307,8 @@ def run(seed: int, cycles: int, backend: str) -> Run:
         machine.run(start + cycles)
     except RuntimeError:  # the Python engine's cache-keyed re-reads met an open bus
         pass
-    return Run(trace, list(machine.events), sid.writes, traps, machine.t)
+    sid_writes = dev.drain_writes() if logged else sid.writes
+    return Run(trace, list(machine.events), sid_writes, traps, machine.t)
 
 
 def _cut(run_: Run, t_cut: int) -> Run:
@@ -354,6 +364,8 @@ def first_divergence(a: Run, b: Run) -> Optional[str]:
     return None
 
 
-def compare(seed: int, cycles: int) -> Optional[str]:
+def compare(seed: int, cycles: int, logged: bool = False) -> Optional[str]:
     """Run ``seed`` on both backends; ``None`` if they agree."""
-    return first_divergence(run(seed, cycles, "python"), run(seed, cycles, "native"))
+    return first_divergence(
+        run(seed, cycles, "python", logged), run(seed, cycles, "native", logged)
+    )

@@ -10,12 +10,12 @@ use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
-use moses_core::{Config, Core, Host, Layout, Watch};
+use moses_core::{Config, Core, Host, Layout, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
@@ -99,12 +99,18 @@ fn watch_all(py: Python<'_>) -> PyResult<&Py<WatchAll>> {
 
 /// The Python side of a run: devices, sink and hooks, called with the GIL re-acquired.
 struct PyHost<'a> {
-    devs: &'a [Py<PyAny>],
+    devs: &'a [HostDev],
     sink: Option<&'a Py<PyAny>>,
     hooks: Hooks,
     me: Option<Py<Machine>>,
     active: &'a AtomicPtr<Core>,
     err: Option<PyErr>,
+}
+
+/// A SID base's Python side: a device with `read`/`write`, or a `NativeSid`'s `on_read`.
+struct HostDev {
+    obj: Py<PyAny>,
+    on_read: bool,
 }
 
 impl PyHost<'_> {
@@ -138,9 +144,13 @@ impl Host for PyHost<'_> {
             return 0;
         }
         let r = Python::attach(|py| {
-            self.devs[dev]
-                .call_method1(py, "read", (cycle, reg))
-                .and_then(|v| v.extract::<i64>(py))
+            let d = &self.devs[dev];
+            if d.on_read {
+                d.obj.call1(py, (cycle, reg))
+            } else {
+                d.obj.call_method1(py, "read", (cycle, reg))
+            }
+            .and_then(|v| v.extract::<i64>(py))
         });
         r.map(|v| v as u8).unwrap_or_else(|e| {
             self.fail(e);
@@ -154,6 +164,7 @@ impl Host for PyHost<'_> {
         }
         if let Err(e) = Python::attach(|py| {
             self.devs[dev]
+                .obj
                 .call_method1(py, "write", (cycle, reg, value))
                 .map(drop)
         }) {
@@ -229,7 +240,8 @@ fn layout(item: &Bound<'_, PyAny>) -> PyResult<Layout> {
 #[pyclass(module = "vagrant_moses._core", name = "Machine", frozen, subclass)]
 pub struct Machine {
     core: UnsafeCell<Box<Core>>,
-    devs: Vec<Py<PyAny>>,
+    devs: Vec<HostDev>,
+    logged: Vec<Py<NativeSid>>,
     sids: Py<PyDict>,
     sink: Option<Py<PyAny>>,
     hooks: UnsafeCell<Hooks>,
@@ -328,9 +340,24 @@ impl Machine {
     ) -> PyResult<Self> {
         let mut devs = Vec::new();
         let mut map = Vec::new();
+        let mut logged = Vec::new();
         for (k, v) in sids.iter() {
-            map.push((k.extract::<u32>()?, devs.len()));
-            devs.push(v.unbind());
+            let base = k.extract::<u32>()?;
+            if let Ok(sid) = v.cast::<NativeSid>() {
+                let sid = sid.clone();
+                map.push((base, SidDev::Logged(sid.get().shared.clone(), devs.len())));
+                devs.push(HostDev {
+                    obj: sid.get().on_read.clone_ref(sid.py()),
+                    on_read: true,
+                });
+                logged.push(sid.unbind());
+            } else {
+                map.push((base, SidDev::Host(devs.len())));
+                devs.push(HostDev {
+                    obj: v.unbind(),
+                    on_read: false,
+                });
+            }
         }
         let layouts = layouts
             .try_iter()?
@@ -350,6 +377,7 @@ impl Machine {
         Ok(Machine {
             core: UnsafeCell::new(Box::new(Core::new(cfg))),
             devs,
+            logged,
             sids: sids.unbind(),
             sink: on_event,
             hooks: UnsafeCell::new(Hooks::default()),
@@ -586,6 +614,11 @@ impl Machine {
         let me = slf.get();
         let py = slf.py();
         let _claim = me.owner.claim()?;
+        let _sids = me
+            .logged
+            .iter()
+            .map(|sid| sid.get().owner.claim())
+            .collect::<PyResult<Vec<_>>>()?;
         let mut host = me.host();
         host.me = Some(slf.clone().unbind());
         let h = me.hooks();
@@ -626,6 +659,78 @@ impl Machine {
         }
         Self::port_hook(slf, core)?;
         Ok(cycle)
+    }
+}
+
+/// The register log and bus-value model of a SID whose chip lives in Python.
+///
+/// Writes are logged natively. A read of `$19-$1C` calls `on_read(cycle, reg)` and the byte it
+/// returns is the register; every other read is the decaying bus value.
+#[pyclass(module = "vagrant_moses._core", name = "NativeSid", frozen)]
+pub struct NativeSid {
+    shared: Arc<SidShared>,
+    on_read: Py<PyAny>,
+    owner: Owner,
+    model: String,
+}
+
+impl NativeSid {
+    #[allow(clippy::mut_from_ref)]
+    fn state(&self) -> PyResult<&mut moses_core::SidState> {
+        self.owner.check()?;
+        // SAFETY: GIL held and the owner check refuses a thread but the running machine's.
+        Ok(unsafe { self.shared.state() })
+    }
+}
+
+#[pymethods]
+impl NativeSid {
+    #[new]
+    fn new(model: &str, on_read: Py<PyAny>) -> PyResult<Self> {
+        if !matches!(model, "6581" | "8580") {
+            return Err(PyValueError::new_err("model must be '6581' or '8580'"));
+        }
+        Ok(NativeSid {
+            shared: Arc::new(SidShared::new(model == "8580")),
+            on_read,
+            owner: Owner::default(),
+            model: model.to_owned(),
+        })
+    }
+
+    #[getter]
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn write(&self, cycle: i64, reg: i64, value: i64) -> PyResult<()> {
+        self.state()?.write(cycle, (reg & 0x1F) as u8, byte(value)?);
+        Ok(())
+    }
+
+    fn read(&self, py: Python<'_>, cycle: i64, reg: i64) -> PyResult<u8> {
+        let reg = (reg & 0x1F) as u8;
+        if let Some(v) = self.state()?.peek(cycle, reg) {
+            return Ok(v);
+        }
+        let v = byte(self.on_read.call1(py, (cycle, reg))?.extract(py)?)?;
+        self.state()?.settle(cycle, v);
+        Ok(v)
+    }
+
+    /// Every write since the last drain as `(cycle, reg, value)`.
+    fn drain_writes(&self) -> PyResult<Vec<(i64, u8, u8)>> {
+        Ok(std::mem::take(&mut self.state()?.writes))
+    }
+
+    /// The writes since the last drain that changed their register, as `sidtrace` logs them.
+    fn drain_rows(&self) -> PyResult<Vec<(i64, u8, u8)>> {
+        Ok(std::mem::take(&mut self.state()?.rows))
+    }
+
+    #[getter]
+    fn last<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, &self.state()?.last))
     }
 }
 
@@ -857,6 +962,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Memory>()?;
     m.add_class::<Registers>()?;
     m.add_class::<Chip>()?;
+    m.add_class::<NativeSid>()?;
     m.add_class::<WatchAll>()?;
     m.add("WATCH_ALL", watch_all(m.py())?.clone_ref(m.py()))?;
     m.add("NAMES", PyTuple::new(m.py(), NAMES)?)?;

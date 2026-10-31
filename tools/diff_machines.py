@@ -1,6 +1,6 @@
 """Run random programs on the Python and native machines and report any divergence.
 
-python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24
+python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24 [--sid logged]
 """
 
 from __future__ import annotations
@@ -18,8 +18,10 @@ import machine_diff  # pylint: disable=wrong-import-position
 
 
 def _one(args):
-    seed, cycles = args
-    return seed, machine_diff.compare(seed, cycles)
+    seed, cycles, logged = args
+    return f"{seed}{' (logged)' if logged else ''}", machine_diff.compare(
+        seed, cycles, logged
+    )
 
 
 def main():
@@ -28,9 +30,20 @@ def main():
     parser.add_argument("--programs", type=int, default=500)
     parser.add_argument("--first", type=int, default=0)
     parser.add_argument("--cycles", type=int, default=2_000_000)
+    parser.add_argument(
+        "--sid",
+        choices=("device", "logged", "both"),
+        default="both",
+        help="SID as a Python device, as a NativeSid, or each",
+    )
     parser.add_argument("--jobs", type=int, default=os.cpu_count())
     args = parser.parse_args()
-    seeds = [(s, args.cycles) for s in range(args.first, args.first + args.programs)]
+    kinds = {"device": (False,), "logged": (True,), "both": (False, True)}[args.sid]
+    seeds = [
+        (s, args.cycles, logged)
+        for s in range(args.first, args.first + args.programs)
+        for logged in kinds
+    ]
     bad = []
     with Pool(args.jobs) as pool:
         for seed, why in tqdm(pool.imap_unordered(_one, seeds), total=len(seeds)):

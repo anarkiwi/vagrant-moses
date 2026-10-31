@@ -1,9 +1,12 @@
-"""Benchmark the Python and native machines on a playroutine-shaped workload.
+"""Benchmark the Python and native machines, with and without a SID.
 
-A CIA IRQ plays a SID routine with indexed writes while the main loop runs an
+``play``: a CIA IRQ plays a SID routine with indexed writes while the main loop runs an
 ``(zp),Y`` copy, illegal opcodes and a ``$D012`` spin, with all sprites enabled.
+``heavy``: an ``STA $D400,X`` loop over every register. The SID is absent (``none``), a
+Python device (``device``) or a NativeSid whose chip is never asked (``logged``).
+Only ``Machine.run`` is timed; the NativeSid log is drained between slices.
 
-    python tools/bench_machine.py --seconds 20
+    python tools/bench_machine.py --seconds 20 --backend native
 """
 
 from __future__ import annotations
@@ -19,11 +22,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tests"))
 
 # pylint: disable=wrong-import-position
 from vagrant_moses import memmap as mm
-from vagrant_moses.machine import NATIVE, Machine, boot_cycle
+from vagrant_moses.machine import NATIVE, Machine, NativeSid, boot_cycle
 
 from asm import assemble
 
-ORG, IRQ, TABLE = 0x1000, 0x1200, 0x1300
+ORG, IRQ, TABLE, SLICES = 0x1000, 0x1200, 0x1300, 10
 SOURCE = f"""
   SEI
   LDA #$7F
@@ -70,6 +73,14 @@ spin: LDA $D012
   BNE spin
   JMP main
 """
+HEAVY = """
+  LDA #$55
+main: LDX #$18
+loop: STA $D400,X
+  DEX
+  BPL loop
+  JMP main
+"""
 HANDLER = f"""
   LDY #$18
 play: LDA ${TABLE:04X},Y
@@ -99,35 +110,62 @@ class Sid:
         self.count += 1
 
 
-def bench(backend, seconds):
+class Counted:
+    """A NativeSid whose log is counted and dropped."""
+
+    def __init__(self):
+        self.count = 0
+        self.dev = NativeSid("6581", lambda _cycle, _register: 0)
+
+    def drain(self):
+        self.count += len(self.dev.drain_writes())
+
+
+def bench(backend, workload, kind, seconds):
     """``(Mcycles/s, x realtime, SID writes)`` for ``seconds`` PAL seconds."""
-    sid = Sid()
-    machine = Machine(sids={mm.SID_BASE: sid}, backend=backend)
-    for org, src in ((ORG, SOURCE), (IRQ, HANDLER)):
+    sid = {"none": None, "device": Sid(), "logged": Counted()}[kind]
+    dev = sid.dev if kind == "logged" else sid
+    machine = Machine(sids=None if dev is None else {mm.SID_BASE: dev}, backend=backend)
+    programs = (
+        ((ORG, SOURCE), (IRQ, HANDLER)) if workload == "play" else ((ORG, HEAVY),)
+    )
+    for org, src in programs:
         code, _ = assemble(src, org)
         machine.ram[org : org + len(code)] = code
     machine.ram[TABLE : TABLE + 256] = bytes(range(256))
     start = machine.reset(ORG, boot_cycle(False))
     clock = mm.PAL.clock_hz
-    began = time.perf_counter()
-    for second in tqdm(range(1, int(seconds) + 1), desc=backend, unit="s"):
-        machine.run(start + second * clock)
-    wall = time.perf_counter() - began
+    slices, wall = int(seconds * SLICES), 0.0
+    for n in tqdm(
+        range(1, slices + 1), desc=f"{backend}/{workload}/{kind}", unit="s/10"
+    ):
+        began = time.perf_counter()
+        machine.run(start + n * clock // SLICES)
+        wall += time.perf_counter() - began
+        if kind == "logged":
+            sid.drain()
     cycles = machine.t - start
-    return cycles / wall / 1e6, cycles / wall / clock, sid.count
+    writes = getattr(sid, "count", 0)
+    return cycles / wall / 1e6, cycles / wall / clock, writes
 
 
 def main():
-    """Print Mcycles/s and the speed relative to a real C64 for each backend."""
+    """Print Mcycles/s and the speed relative to a real C64 per backend, workload, SID."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=20)
     parser.add_argument("--backend", choices=("python", "native"), action="append")
+    parser.add_argument("--workload", choices=("play", "heavy"), action="append")
+    parser.add_argument("--sid", choices=("none", "device", "logged"), action="append")
     args = parser.parse_args()
+    print("| backend | workload | SID | Mcycles/s | x realtime | SID writes |")
+    print("|---|---|---|---:|---:|---:|")
     for backend in args.backend or ["python"] + ["native"] * NATIVE:
-        mcps, ratio, writes = bench(backend, args.seconds)
-        print(
-            f"{backend:>7}: {mcps:8.2f} Mcycles/s  {ratio:8.1f}x realtime  {writes} SID writes"
-        )
+        for workload in args.workload or ("play", "heavy"):
+            for kind in args.sid or ("none", "device", "logged"):
+                mcps, ratio, writes = bench(backend, workload, kind, args.seconds)
+                print(
+                    f"| {backend} | {workload} | {kind} | {mcps:.2f} | {ratio:.1f} | {writes} |"
+                )
 
 
 if __name__ == "__main__":
