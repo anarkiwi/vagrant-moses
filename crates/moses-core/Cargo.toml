@@ -1,0 +1,11 @@
+[package]
+name = "moses-core"
+description = "Cycle-exact C64 (6510 cycle loop, VIC-II, CIAs, two-phase scheduler, banked bus) over jennings-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+jennings-core = { git = "https://github.com/anarkiwi/jennings", tag = "v0.5.1" }
