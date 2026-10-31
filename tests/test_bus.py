@@ -194,16 +194,33 @@ def test_flat_mpu_banks_roms_through_the_port(native):
     assert bus.bits == 7 and mem[1] == port_read(0, 0)
 
 
-def test_native_ram_is_owned_by_the_native_memory():
+def test_native_stores_land_in_the_callers_buffer():
+    ram, mpu, mem = _flat([0xA9, 0x5C, 0x8D, 0x43, 0x30, 0x60], native=True)
+    run_to_rts(mpu, mem, CODE, 0, max_cycles=1000)  # LDA #$5C; STA $3043; RTS
+    assert ram[0x3043] == 0x5C
+    ram[0x3044] = 0x77
+    assert mem[0x3044] == 0x77
+
+
+def test_native_bus_ram_is_the_callers_buffer():
     ram = bytearray(0x10000)
     ram[0x2000] = 0x11
     _, mem = flat_mpu(ram, native=True)
-    assert mem[0x2000] == 0x11 and mem._subject.ram[0x2000] == 0x11
+    assert mem._subject.ram[0x2000] == 0x11
+    mem[0x2001] = 0x22
+    assert ram[0x2001] == 0x22 and mem._subject.ram[0x2001] == 0x22
+    mem._subject.ram[0x2002] = 0x33
+    assert ram[0x2002] == 0x33 and mem[0x2002] == 0x33 and len(mem) == 0x10000
+    assert mem.last_load in (0, None) and mem._subject is mem
+
+
+@pytest.mark.parametrize("make", [bytes, lambda n: bytearray(n - 1)])
+def test_native_copies_a_buffer_it_cannot_share(make):
+    ram = make(0x10000)
+    _, mem = flat_mpu(ram, native=True)
     mem[0x2001] = 0x22
     assert mem._subject.ram[0x2001] == 0x22 and ram[0x2001] == 0
-    mem._subject.ram[0x2002] = 0x33
-    assert mem[0x2002] == 0x33 and len(mem) == 0x10000
-    assert mem.last_load in (0, None) and mem._subject is mem
+    assert len(mem) == 0x10000
 
 
 def test_native_true_without_native_core(monkeypatch):
