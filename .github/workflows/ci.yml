@@ -24,9 +24,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
       - name: black --check
-        run: black --check src tests scripts
+        run: black --check src tests scripts tools
       - name: pylint
-        run: pylint src tests scripts
+        run: pylint src tests scripts tools
       - name: pytest + coverage (> 85%)
         run: pytest --cov=vagrant_moses --cov-report=term-missing --cov-fail-under=85
 

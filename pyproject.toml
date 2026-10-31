@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vagrant-moses"
-version = "0.4.0"
+version = "0.5.0"
 description = "Standalone C64 machine model: memory map, banked bus and ROMs, VIC-II and CIAs over a two-phase scheduler, a cycle-exact 6510 machine, KERNAL traps, IRQ dispatch, and native d64/d71/d81/t64 media extraction"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,10 +27,10 @@ vagrant-moses = "vagrant_moses.cli:main"
 [project.optional-dependencies]
 cli = ["tqdm>=4"]
 # The cycle-exact Machine, flat_mpu and KernalHost step a jennings 6510.
-cpu = ["jennings>=0.1.1"]
+cpu = ["jennings>=0.5.1"]
 dev = [
     "tqdm>=4",
-    "jennings>=0.1.1",
+    "jennings>=0.5.1",
     "black>=24",
     "pylint>=3",
     "pytest>=7",
