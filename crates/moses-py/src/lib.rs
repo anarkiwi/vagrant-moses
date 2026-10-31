@@ -10,6 +10,7 @@ use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
@@ -235,6 +236,7 @@ pub struct Machine {
     owner: Owner,
     active: AtomicPtr<Core>,
     ntsc: bool,
+    views: [OnceLock<Py<Memory>>; 5],
 }
 
 // SAFETY: every access holds the GIL; while a run is detached, `owner` refuses all threads
@@ -261,6 +263,22 @@ impl Machine {
     fn hooks(&self) -> &mut Hooks {
         // SAFETY: GIL held; callers never hold two borrows at once.
         unsafe { &mut *self.hooks.get() }
+    }
+
+    /// The one view of memory `which` (0 RAM, 1 colour RAM, 2-4 BASIC/CHARGEN/KERNAL).
+    fn view(slf: &Bound<'_, Self>, which: u8) -> PyResult<Py<Memory>> {
+        let cell = &slf.get().views[which as usize];
+        if let Some(v) = cell.get() {
+            return Ok(v.clone_ref(slf.py()));
+        }
+        let v = Py::new(
+            slf.py(),
+            Memory {
+                machine: slf.clone().unbind(),
+                which,
+            },
+        )?;
+        Ok(cell.get_or_init(|| v).clone_ref(slf.py()))
     }
 
     fn host(&self) -> PyHost<'_> {
@@ -338,6 +356,7 @@ impl Machine {
             owner: Owner::default(),
             active: AtomicPtr::new(ptr::null_mut()),
             ntsc,
+            views: Default::default(),
         })
     }
 
@@ -427,19 +446,25 @@ impl Machine {
     }
 
     #[getter]
-    fn ram(slf: &Bound<'_, Self>) -> Memory {
-        Memory {
-            machine: slf.clone().unbind(),
-            which: 0,
-        }
+    fn ram(slf: &Bound<'_, Self>) -> PyResult<Py<Memory>> {
+        Self::view(slf, 0)
     }
 
     #[getter]
-    fn colour(slf: &Bound<'_, Self>) -> Memory {
-        Memory {
-            machine: slf.clone().unbind(),
-            which: 1,
-        }
+    fn colour(slf: &Bound<'_, Self>) -> PyResult<Py<Memory>> {
+        Self::view(slf, 1)
+    }
+
+    /// The 16 4 KiB pages as the CPU maps them: RAM, a ROM image, or `None` for I/O.
+    #[getter]
+    fn pages(slf: &Bound<'_, Self>) -> PyResult<Vec<Option<Py<Memory>>>> {
+        let map = slf.get().core()?.s.map;
+        map.iter()
+            .map(|&k| match k {
+                moses_core::sys::IO => Ok(None),
+                k => Self::view(slf, if k == 0 { 0 } else { k + 1 }).map(Some),
+            })
+            .collect()
     }
 
     #[getter]
@@ -530,6 +555,25 @@ impl Machine {
         host.err.map_or(Ok(v), Err)
     }
 
+    /// A read of the I/O page `$D000-$DFFF`, whatever the banking.
+    fn io_read(&self, addr: i64) -> PyResult<u8> {
+        let core = self.core()?;
+        let mut host = self.host();
+        let v = core.s.io_read(&mut host, (addr & 0xFFFF) as u16);
+        core.s.flush(&mut host);
+        host.err.map_or(Ok(v), Err)
+    }
+
+    /// A write to the I/O page `$D000-$DFFF` now, bypassing the pending-write queue.
+    fn io_write(&self, addr: i64, value: i64) -> PyResult<()> {
+        let core = self.core()?;
+        let mut host = self.host();
+        core.s
+            .io_write(&mut host, (addr & 0xFFFF) as u16, byte(value)?);
+        core.s.flush(&mut host);
+        host.err.map_or(Ok(()), Err)
+    }
+
     fn __setitem__(slf: &Bound<'_, Self>, addr: i64, value: i64) -> PyResult<()> {
         let me = slf.get();
         let core = me.core()?;
@@ -606,11 +650,13 @@ pub struct Memory {
 impl Memory {
     fn raw(&self, py: Python<'_>) -> PyResult<(*mut u8, usize)> {
         let core = self.machine.get().core()?;
-        Ok(if self.which == 0 {
-            (core.s.img[0].as_mut_ptr(), 0x10000)
-        } else {
-            let _ = py;
-            (core.s.colour.as_mut_ptr(), 0x400)
+        let _ = py;
+        Ok(match self.which {
+            1 => (core.s.colour.as_mut_ptr(), 0x400),
+            k => (
+                core.s.img[k.saturating_sub(1) as usize].as_mut_ptr(),
+                0x10000,
+            ),
         })
     }
 
@@ -625,10 +671,10 @@ impl Memory {
 #[pymethods]
 impl Memory {
     fn __len__(&self) -> usize {
-        if self.which == 0 {
-            0x10000
-        } else {
+        if self.which == 1 {
             0x400
+        } else {
+            0x10000
         }
     }
 

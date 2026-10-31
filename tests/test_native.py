@@ -271,3 +271,34 @@ def test_another_thread_is_refused_while_the_machine_runs():
     machine.run(start + 100)
     thread.join()
     assert len(refused) == 1
+
+
+def test_pages_follow_the_banking_and_ram_is_one_object():
+    native, python = Machine(backend="native"), Machine(backend="python")
+    assert native.ram is native.ram and native.colour is native.colour
+    for port in (0x37, 0x35, 0x34, 0x33, 0x36, 0x31):
+        native[1], python[1] = port, port
+        assert native.bits == python.bits
+        for page, ref in zip(native.pages, python.pages):
+            assert (page is None) == (ref is None)
+            if page is not None:
+                span = slice(0, 0x10000)
+                assert bytes(page[span]) == bytes(ref[span])
+        assert (
+            (native.pages[0xC] is native.ram)
+            and native.pages[0xD] is not native.ram
+            or (port & 7 in (4, 0, 1))
+        )
+
+
+def test_io_access_bypasses_the_pending_queue_and_banking():
+    sid = machine_diff.Sid()
+    native = Machine(sids={mm.SID_BASE: sid}, backend="native")
+    python = Machine(sids={mm.SID_BASE: machine_diff.Sid()}, backend="python")
+    for machine in (native, python):
+        machine[1] = 0x34  # I/O banked out: io_* still reach the chips
+        machine.io_write(0xD400 + 4, 0x21)
+        machine.io_write(0xD800, 0x1F)
+    assert sid.writes == [(native.t, 4, 0x21)] and native.colour[0] == 0x0F
+    for addr in (0xD012, 0xD41B, 0xD800, 0xDC04, 0xDE00):
+        assert native.io_read(addr) == python.io_read(addr)
