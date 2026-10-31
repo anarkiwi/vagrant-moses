@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import builtins
 import collections
+import functools
+import sys
 
 import pytest
 
@@ -14,6 +16,20 @@ from vagrant_moses.machine import BR, X2, Machine, boot_cycle, opcode_layout
 from asm import assemble
 
 pytest.importorskip("jennings")
+
+BACKENDS = ["python"] + ["native"] * vm.NATIVE
+
+
+@pytest.fixture(autouse=True, params=BACKENDS)
+def backend(request, monkeypatch):
+    """Run every test on each machine backend."""
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "Machine",
+        functools.partial(Machine, backend=request.param),
+    )
+    return request.param
+
 
 ORG = 0x1000
 LINE, FRAME = mm.PAL.cycles_per_line, mm.PAL.cycles_per_frame

@@ -1,6 +1,6 @@
 """Run random programs on the Python and native machines and report any divergence.
 
-    python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24
+python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24
 """
 
 from __future__ import annotations

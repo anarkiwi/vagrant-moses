@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 from array import array
-from typing import List, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 from jennings.opcodes import OPCODES
 
@@ -122,7 +122,11 @@ def program(seed: int):
                 soup += (rng.choice(starts) + rng.randrange(3)).to_bytes(2, "little")
                 continue
             hi = rng.choice(_HI)
-            lo = rng.randrange(256) if rng.random() < 0.7 else rng.choice(_ZP + [0x0D, 0x0E])
+            lo = (
+                rng.randrange(256)
+                if rng.random() < 0.7
+                else rng.choice(_ZP + [0x0D, 0x0E])
+            )
             soup += bytes((lo, hi))
         if len(starts) % 12 == 0:
             soup += b"\x4c" + rng.choice(starts).to_bytes(2, "little")
