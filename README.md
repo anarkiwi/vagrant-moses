@@ -7,7 +7,7 @@ machine matching libsidplayfp, KERNAL file/keyboard traps, the power-on RAM, the
 installed-interrupt-vector discovery, the ROM-free IRQ dispatch path, and native
 extraction of files from release media (zip/gzip, d64/d71/d81, t64, p00).
 
-Pure Python with no runtime dependencies; the CPU-driven parts (`Machine`, `flat_mpu`,
+Pure Python with no runtime dependencies (wheels also carry a native Rust `Machine`); the CPU-driven parts (`Machine`, `flat_mpu`,
 `KernalHost`) run on jennings via the `cpu` extra; the media CLI's progress bar
 needs the `cli` extra. The SID audio model and SID-file knowledge (PSID/RSID
 containers, subtune headers, drivers) are deliberately not here.
@@ -51,6 +51,7 @@ vagrant-moses media extract dl/ -o prg/                 # prints sha256 size $lo
 ## Docs
 
 - [The machine model: memory map, bus, ROMs, chips, machine, KERNAL and IRQ dispatch](docs/c64.md)
+- [The native machine: Rust port, hooks, threading, verification](docs/native.md)
 - [Release media: nested containers, disk geometries, tapes, and the CLI](docs/media.md)
 
 ## Develop
