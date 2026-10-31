@@ -34,7 +34,7 @@ from .cia import Cia, InterruptSource, Timer
 from .media import MediaError, MediaFile, iter_prgs, read_disk, read_t64
 from .eventsched import Event, PHI1, PHI2, Scheduler
 from .kernal import KernalHost, KernalHostError, sys_addr
-from .machine import Machine, boot_cycle
+from .machine import Machine, NativeSid, boot_cycle
 from .memmap import NTSC, PAL, Video
 from .roms import RomFetchError, kernal_stub
 from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
@@ -67,6 +67,7 @@ __all__ = [
     "KernalHostError",
     "sys_addr",
     "Machine",
+    "NativeSid",
     "boot_cycle",
     "PAL",
     "NTSC",

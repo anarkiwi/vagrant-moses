@@ -223,9 +223,10 @@ def test_reset_defaults_to_the_power_on_cycle():
     assert machine.reset(ORG, 5000) == 5000
 
 
+@pytest.mark.parametrize("logged", [False, True])
 @pytest.mark.parametrize("seed", range(6))
-def test_random_programs_agree_with_the_python_machine(seed):
-    assert machine_diff.compare(seed, 300_000) is None
+def test_random_programs_agree_with_the_python_machine(seed, logged):
+    assert machine_diff.compare(seed, 300_000, logged) is None
 
 
 def test_the_gil_is_released_and_machines_run_in_parallel():

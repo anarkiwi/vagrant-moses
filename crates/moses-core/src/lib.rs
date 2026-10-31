@@ -5,8 +5,10 @@ pub mod cia;
 pub mod lines;
 pub mod machine;
 pub mod sched;
+pub mod sid;
 pub mod sys;
 pub mod vic;
 
 pub use machine::{Config, Core, Layout, Watch};
-pub use sys::Host;
+pub use sid::{SidShared, SidState};
+pub use sys::{Host, SidDev};

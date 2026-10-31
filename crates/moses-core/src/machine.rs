@@ -8,7 +8,7 @@ use jennings_core::{AddrSet, Cpu};
 use crate::cia::Cia;
 use crate::lines::{self, Lines, MAX};
 use crate::sched::Sched;
-use crate::sys::{BusRef, Host, Sys, RAM};
+use crate::sys::{BusRef, Host, SidDev, Sys, RAM};
 use crate::vic::Vic;
 
 // Entry kinds of libsidplayfp's per-opcode cycle tables; those below `R` write.
@@ -84,7 +84,7 @@ pub struct Config {
     /// BASIC, CHARGEN and KERNAL as 64 KiB images indexed by absolute address.
     pub roms: [Box<[u8; 0x10000]>; 3],
     pub layouts: Vec<Layout>,
-    pub sids: Vec<(u32, usize)>,
+    pub sids: Vec<(u32, SidDev)>,
     pub custom_sink: bool,
     pub lines: i32,
     pub cycles_per_line: i32,

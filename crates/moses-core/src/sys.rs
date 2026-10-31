@@ -1,12 +1,14 @@
 //! Everything the 6510 sees besides itself: banked memory, the I/O page and the chips.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use jennings_core::Bus;
 
 use crate::cia::Cia;
 use crate::lines::Lines;
 use crate::sched::{Sched, E_BADLINE, E_CLEAR_INT, E_EDGE, E_VIC, PHI1};
+use crate::sid::SidShared;
 use crate::vic::Vic;
 
 pub const IO: u8 = 255;
@@ -19,6 +21,13 @@ const SID_LAST: u16 = 0xD7FF;
 const LORAM: u8 = 1;
 const HIRAM: u8 = 2;
 const CHAREN: u8 = 4;
+
+/// What answers at a SID base: a host device, or a logging device that asks the host
+/// (with the host index) only for the registers a chip drives.
+pub enum SidDev {
+    Host(usize),
+    Logged(Arc<SidShared>, usize),
+}
 
 /// The Python side of the machine: SID devices, the event sink and the hooks.
 pub trait Host {
@@ -71,7 +80,7 @@ pub struct Sys {
     pub last_read: u8,
     pub seed: u32,
     /// SID device bases (as keyed by the caller) and their host index.
-    pub sids: Vec<(u32, usize)>,
+    pub sids: Vec<(u32, SidDev)>,
     pub events: Vec<(i64, u8)>,
     pub custom_sink: bool,
     pub port_dirty: bool,
@@ -122,8 +131,8 @@ impl Sys {
         }
     }
 
-    fn sid(&self, addr: u16) -> Option<usize> {
-        let find = |base: u32| self.sids.iter().find(|s| s.0 == base).map(|s| s.1);
+    fn sid(sids: &[(u32, SidDev)], addr: u16) -> Option<&SidDev> {
+        let find = |base: u32| sids.iter().find(|s| s.0 == base).map(|s| &s.1);
         find((addr & 0xFFE0) as u32).or_else(|| {
             if (SID_BASE..=SID_LAST).contains(&addr) {
                 find(SID_BASE as u32)
@@ -138,14 +147,30 @@ impl Sys {
         let value = if page < 0xD4 {
             self.vic.read(addr, &mut self.sched, &mut self.ln)
         } else if !(0xD8..0xDE).contains(&page) {
-            match self.sid(addr) {
+            let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
+            match Self::sid(&self.sids, addr) {
                 None => {
                     self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
                     self.seed as u8
                 }
-                Some(dev) => {
+                Some(&SidDev::Host(dev)) => {
                     self.flush(h);
-                    h.sid_read(dev, self.sched.time(PHI1), (addr & 0x1F) as u8)
+                    h.sid_read(dev, cycle, reg)
+                }
+                Some(SidDev::Logged(state, dev)) => {
+                    // SAFETY: serialised by the machine's run claim; no reference outlives the call.
+                    let peeked = unsafe { state.state() }.peek(cycle, reg);
+                    match peeked {
+                        Some(v) => v,
+                        None => {
+                            let (state, dev) = (Arc::clone(state), *dev);
+                            self.flush(h);
+                            let v = h.sid_read(dev, cycle, reg);
+                            // SAFETY: as above; the host call has returned.
+                            unsafe { state.state() }.settle(cycle, v);
+                            v
+                        }
+                    }
                 }
             }
         } else if page < 0xDC {
@@ -163,9 +188,15 @@ impl Sys {
         if page < 0xD4 {
             self.vic.write(addr, value, &mut self.sched, &mut self.ln);
         } else if !(0xD8..0xDE).contains(&page) {
-            if let Some(dev) = self.sid(addr) {
-                self.flush(h);
-                h.sid_write(dev, self.sched.time(PHI1), (addr & 0x1F) as u8, value);
+            let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
+            match Self::sid(&self.sids, addr) {
+                None => {}
+                Some(&SidDev::Host(dev)) => {
+                    self.flush(h);
+                    h.sid_write(dev, cycle, reg, value);
+                }
+                // SAFETY: serialised by the machine's run claim; no reference outlives the call.
+                Some(SidDev::Logged(state, _)) => unsafe { state.state() }.write(cycle, reg, value),
             }
         } else if page < 0xDC {
             self.colour[(addr & 0x3FF) as usize] = value & 0x0F;

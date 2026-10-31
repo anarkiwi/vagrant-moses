@@ -1,15 +1,19 @@
 //! The core on hand-assembled programs, with the cycle counts the 6510 documents.
 
 use moses_core::machine::{BRK_LAYOUT, CLI, F, POPSR, R, RTI, SEI, W};
-use moses_core::{Config, Core, Host, Layout};
+use std::sync::Arc;
+
+use moses_core::{Config, Core, Host, Layout, SidDev, SidShared};
 
 #[derive(Default)]
 struct Log {
     sid: Vec<(i64, u8, u8)>,
+    reads: Vec<u8>,
 }
 
 impl Host for Log {
-    fn sid_read(&mut self, _dev: usize, _cycle: i64, _reg: u8) -> u8 {
+    fn sid_read(&mut self, _dev: usize, _cycle: i64, reg: u8) -> u8 {
+        self.reads.push(reg);
         0
     }
     fn sid_write(&mut self, _dev: usize, cycle: i64, reg: u8, value: u8) {
@@ -53,6 +57,10 @@ fn layouts() -> Vec<Layout> {
 }
 
 fn core(program: &[(u16, &[u8])]) -> Core {
+    core_with(program, SidDev::Host(0))
+}
+
+fn core_with(program: &[(u16, &[u8])], sid: SidDev) -> Core {
     let mut ram = image();
     let mut kernal = image();
     kernal[0xFFFE] = 0x00;
@@ -66,7 +74,7 @@ fn core(program: &[(u16, &[u8])]) -> Core {
         ram,
         roms: [image(), image(), kernal],
         layouts: layouts(),
-        sids: vec![(0xD400, 0)],
+        sids: vec![(0xD400, sid)],
         custom_sink: false,
         lines: 312,
         cycles_per_line: 63,
@@ -131,4 +139,30 @@ fn rdy_stalls_the_cpu_on_a_badline() {
     }
     // The same cycle count retires fewer instructions when BA is pulled low.
     assert!(busy.cpu.cycles < quiet.cpu.cycles - 400);
+}
+
+#[test]
+fn a_logged_sid_calls_the_host_only_for_readable_registers() {
+    // LDA #$55 / STA $D400 / LDA $D41B / LDA $D400 / JMP $1000
+    let program = [
+        0xA9, 0x55, 0x8D, 0x00, 0xD4, 0xAD, 0x1B, 0xD4, 0xAD, 0x00, 0xD4, 0x4C, 0x00, 0x10,
+    ];
+    let shared = Arc::new(SidShared::new(false));
+    let mut c = core_with(
+        &[(0x1000, &program)],
+        SidDev::Logged(Arc::clone(&shared), 0),
+    );
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    c.run(&mut host, 2200);
+    assert!(host.sid.is_empty());
+    assert!(!host.reads.is_empty() && host.reads.iter().all(|&r| r == 0x1B));
+    // SAFETY: the run has returned.
+    let state = unsafe { shared.state() };
+    assert!(state.writes.len() > 5);
+    assert!(state
+        .writes
+        .iter()
+        .all(|&(_, reg, v)| reg == 0 && v == 0x55));
+    assert_eq!(state.rows.len(), 1);
 }

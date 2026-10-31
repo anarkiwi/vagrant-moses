@@ -13,6 +13,7 @@ from . import memmap as mm
 from .bus import Bus
 from .c64 import poweron_ram
 from .roms import rom_less
+from .sid import PyNativeSid
 from .cia import Cia
 from .eventsched import PHI1, Event, Scheduler
 from .vicii import Vic
@@ -23,6 +24,7 @@ except ImportError:  # no wheel for this platform: the Python machine only
     _core = None
 
 NATIVE = _core is not None
+NativeSid = _core.NativeSid if NATIVE else PyNativeSid
 _MAX = 65536
 # Entry kinds of libsidplayfp's per-opcode cycle tables; those below R write.
 W, PUSHPCH, LOWPC, PUSHSR = range(4)
@@ -196,8 +198,9 @@ class Machine(Bus):
     """The C64 under sidplayfp: a cycle-exact 6510 with the VIC-II and two CIAs.
 
     ``sids`` maps a 32-byte-aligned I/O base to a device with ``read(cycle, reg)``
-    and ``write(cycle, reg, value)``; the ``$D400`` device answers the rest of
-    ``$D400-$D7FF``. ``on_event(cycle, name)`` gets each raise, entry and RTI.
+    and ``write(cycle, reg, value)``, or to a :class:`NativeSid`, which the native machine
+    logs without calling Python except for ``$D419-$D41C``; the ``$D400`` device answers the
+    rest of ``$D400-$D7FF``. ``on_event(cycle, name)`` gets each raise, entry and RTI.
     """
 
     # pylint: disable=too-many-instance-attributes
