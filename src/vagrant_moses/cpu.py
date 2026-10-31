@@ -22,8 +22,9 @@ _PORT = (mm.CPU_DDR, mm.CPU_PORT)
 class NativeBus(Bus):
     """:class:`Bus` banking state over a jennings ``NativeMemory``; also its facade.
 
-    The native memory owns the 64 KiB RAM: ``ram`` is a zero-copy view of it, so
-    ``bus.ram[a]``, ``mem[a]`` and the executing CPU always agree. ROM and I/O
+    ``ram`` is a zero-copy view of the native memory's 64 KiB RAM, so ``bus.ram[a]``,
+    ``mem[a]`` and the executing CPU always agree; when the native memory shares the
+    caller's buffer, that buffer is the same memory. ROM and I/O
     banking are pushed into the native page table whenever ``$00``/``$01`` change.
     Subscriptions and the other ``NativeMemory`` methods are delegated; ``_subject``
     is the bus itself, as ``ObservableMemory._subject`` is on the Python path.
@@ -128,9 +129,10 @@ def flat_mpu(
 
     ``native`` selects the engine: ``None`` follows ``jennings.memory.NATIVE``,
     ``False`` forces the pure-Python one and ``True`` requires the native core.
-    On the Python engine ``ram`` is the live RAM. The native core copies ``ram``
-    in once and owns the RAM afterwards: reach it through ``mem[...]`` or
-    ``mem.ram`` (a zero-copy view), not through the ``ram`` argument.
+    ``ram`` is the live RAM on both engines: the native core runs directly on it,
+    without copying, when it is a writable contiguous 64 KiB buffer (a ``bytearray``).
+    Any other buffer (``bytes``, another length) is copied in once and the native
+    memory owns the RAM afterwards: reach it through ``mem[...]`` or ``mem.ram``.
     """
     try:
         # pylint: disable=import-outside-toplevel
@@ -146,7 +148,10 @@ def flat_mpu(
         native = NATIVE
     timing = mm.video(ntsc)
     if native:
-        core = NativeMemory(ram)
+        try:
+            core = NativeMemory(ram, share=True)
+        except ValueError:
+            core = NativeMemory(ram)
         mem = NativeBus(core, roms)
         core.raster_model(ntsc)
         return MPU(memory=core), mem
