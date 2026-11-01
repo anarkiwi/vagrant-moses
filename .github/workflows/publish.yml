@@ -16,9 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {os: ubuntu-latest, target: x86_64, smoke: true}
-          - {os: ubuntu-24.04-arm, target: aarch64, smoke: true}
-          - {os: macos-15, target: aarch64, smoke: false}
+          - {os: ubuntu-latest, target: x86_64}
+          - {os: ubuntu-24.04-arm, target: aarch64}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -32,7 +31,6 @@ jobs:
           manylinux: auto
           args: --release --locked --out dist
       - name: Smoke test
-        if: matrix.smoke
         run: |
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install dist/*.whl
