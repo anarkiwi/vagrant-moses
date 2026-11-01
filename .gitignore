@@ -221,3 +221,7 @@ __marimo__/
 
 # Agent worktrees
 .claude/
+
+# Process core dumps
+core
+core.[0-9]*
