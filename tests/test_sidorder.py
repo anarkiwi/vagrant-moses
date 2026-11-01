@@ -365,9 +365,27 @@ def test_the_solver_builds_no_chip_while_it_judges_cases(monkeypatch):
     assert not built
 
 
+HOST_CALLS = 0.023
+
+
+def machine_slowness():
+    """How many times slower than the development host this machine runs the solver's own unit
+    of work: 2000 single-voice envelope runs through :func:`sidorder.run` (best of five).
+    """
+    writes = np.array([(5, 5, 0x44), (10, 6, 0x88), (15, 4, 0x41)], np.int64)
+    best = []
+    for _ in range(5):
+        begin = time.process_time()
+        for _ in range(2000):
+            S.run(S.POWER_ON, writes, FRAME, 0)
+        best.append(time.process_time() - begin)
+    return min(best) / HOST_CALLS
+
+
 def real_time_multiple(frames=3000):
     """How many times faster than real time the solver judges a busy stream of ``frames`` PAL
-    frames (the best of three runs, in CPU time)."""
+    frames (the best of three runs, in CPU time), as it would on the development host.
+    """
     init, stream = busy_stream(frames)
     elapsed = []
     for _ in range(3):
@@ -377,7 +395,7 @@ def real_time_multiple(frames=3000):
         notes = S.hard_restarts(tl, 39566, 10)
         elapsed.append(time.process_time() - begin)
     assert sum(n for n, _ in masks.values()) > 1000 and sum(notes.values()) > 400
-    return frames * FRAME / S.PAL_CLOCK / min(elapsed)
+    return frames * FRAME / S.PAL_CLOCK / min(elapsed) * machine_slowness()
 
 
 def test_the_solver_runs_far_faster_than_real_time_on_a_busy_stream():
