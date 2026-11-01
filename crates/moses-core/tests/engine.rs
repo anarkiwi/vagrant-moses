@@ -4,7 +4,7 @@ use moses_core::lines::{CIA, EV_ENTRY};
 use moses_core::machine::{BRK_LAYOUT, CLI, F, POPSR, R, RTI, SEI, W};
 use std::sync::Arc;
 
-use moses_core::{Config, Core, Host, Layout, SidDev, SidShared};
+use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared};
 
 #[derive(Default)]
 struct Log {
@@ -195,4 +195,37 @@ fn an_reu_copies_c64_memory_while_the_cpu_halts() {
         (reu.peek(2), reu.peek(3), reu.peek(4), reu.peek(7)),
         (5, 0x10, 5, 1)
     );
+}
+
+#[test]
+fn the_recorder_reports_a_store_into_a_later_operand_once() {
+    // LDA #$42 / STA $1006 / LDA #$00 / JMP $1007: the store patches the second LDA's operand.
+    let code = [0xA9, 0x42, 0x8D, 0x06, 0x10, 0xA9, 0x00, 0x4C, 0x07, 0x10];
+    let mut c = core(&[(0x1000, &code)]);
+    let mut table = [1u8; 256];
+    (table[0xA9], table[0x8D], table[0x4C]) = (2, 3, 3);
+    let mut base = image();
+    base[0x1000..0x100A].copy_from_slice(&code);
+    let mut rec = Recorder::new(base, table, true);
+    rec.begin(c.s.bits);
+    c.s.rec = Some(Box::new(rec));
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    c.run(&mut host, 2100);
+    let rec = c.s.rec.as_ref().unwrap();
+    let got: Vec<_> = rec.events.iter().map(|e| (e.fields(), e.first)).collect();
+    assert_eq!(
+        got,
+        [(
+            (
+                smc::W_CPU,
+                Some(0x8D),
+                smc::R_OPERAND,
+                smc::T_SAME_CALL,
+                smc::M_FLAT
+            ),
+            0
+        )]
+    );
+    assert_eq!(rec.unclassified, 0);
 }

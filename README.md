@@ -34,6 +34,7 @@ cia = Cia(sched, interrupt=lambda on: ..., new=False)
 
 machine = Machine(sids={0xD400: sid_device})            # cycle-exact C64
 machine = Machine(reu=512)                               # with a 1750 REU at $DF00
+machine = Machine(roms={0xE000: kernal})                 # a real KERNAL, ROM-less elsewhere
 machine.ram[0x1000:0x1000 + len(code)] = code
 machine.run(machine.reset(0x1000) + 985248)              # one PAL second
 ```
@@ -53,7 +54,7 @@ vagrant-moses media extract dl/ -o prg/                 # prints sha256 size $lo
 ## Docs
 
 - [The machine model: memory map, bus, ROMs, chips, machine, REU, KERNAL and IRQ dispatch](docs/c64.md)
-- [The native machine: Rust port, hooks, threading, verification](docs/native.md)
+- [The native machine: Rust port, hooks, the SMC recorder, threading, verification](docs/native.md)
 - [SID write order and hard restart: event patterns, the order cover, the settled hard restart](docs/sidorder.md)
 - [Release media: nested containers, disk geometries, tapes, and the CLI](docs/media.md)
 

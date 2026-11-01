@@ -16,7 +16,7 @@ use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
 use moses_core::reu::{geometry, REGS, SIZES};
-use moses_core::{Config, Core, Host, Layout, SidDev, SidShared, Watch};
+use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
@@ -303,6 +303,14 @@ impl Machine {
             active: &self.active,
             err: None,
         }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn rec<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Recorder> {
+        core.s
+            .rec
+            .as_deref_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("the SMC recorder is not armed"))
     }
 
     /// The hook a port write dispatches to, once the write is made.
@@ -675,6 +683,156 @@ impl Machine {
         }
         Self::port_hook(slf, core)?;
         Ok(cycle)
+    }
+
+    /// Arm the SMC recorder over the lift-time `image` (64 KiB) with the per-opcode `table`
+    /// (256 bytes, `vagrant_moses.smc.opcode_table`); a re-arm starts afresh.
+    #[pyo3(signature = (image, table, banked=true))]
+    fn smc_arm(
+        &self,
+        image: &Bound<'_, PyAny>,
+        table: &Bound<'_, PyAny>,
+        banked: bool,
+    ) -> PyResult<()> {
+        let base = self::image(&octets(image)?)?;
+        let table: [u8; 256] = octets(table)?
+            .try_into()
+            .map_err(|_| PyValueError::new_err("the opcode table is 256 bytes"))?;
+        self.core()?.s.rec = Some(Box::new(Recorder::new(base, table, banked)));
+        Ok(())
+    }
+
+    fn smc_disarm(&self) -> PyResult<()> {
+        self.core()?.s.rec = None;
+        Ok(())
+    }
+
+    #[getter]
+    fn smc_armed(&self) -> PyResult<bool> {
+        Ok(self.core()?.s.rec.is_some())
+    }
+
+    /// End the pre-lift phase: call 0 starts, under the bank bits now.
+    fn smc_begin(&self) -> PyResult<()> {
+        let core = self.core()?;
+        let bits = core.s.bits;
+        self.rec(core)?.begin(bits);
+        Ok(())
+    }
+
+    fn smc_next_call(&self) -> PyResult<()> {
+        self.rec(self.core()?)?.next_call();
+        Ok(())
+    }
+
+    /// Index events by frame of `frame_cycles` from the next decode on.
+    fn smc_frame_clock(&self, frame_cycles: i64) -> PyResult<()> {
+        if frame_cycles <= 0 {
+            return Err(PyValueError::new_err("frame_cycles must be positive"));
+        }
+        self.rec(self.core()?)?.frame_clock(frame_cycles);
+        Ok(())
+    }
+
+    #[getter]
+    fn smc_call(&self) -> PyResult<i32> {
+        Ok(self.rec(self.core()?)?.call)
+    }
+
+    /// `machine[addr] = value` as the host's own write: no instruction owns the byte, and a
+    /// port write resets the bank-bit writer.
+    fn smc_host_write(slf: &Bound<'_, Self>, addr: i64, value: i64) -> PyResult<()> {
+        let me = slf.get();
+        let core = me.core()?;
+        let addr = (addr & 0xFFFF) as u16;
+        core.poke(addr, byte(value)?);
+        let bits = core.s.bits;
+        me.rec(core)?.host(addr, bits);
+        Self::port_hook(slf, core)
+    }
+
+    /// The first decode after this cycle stops the run and sets `smc_timed_out`.
+    #[getter]
+    fn smc_deadline(&self) -> PyResult<Option<i64>> {
+        let d = self.rec(self.core()?)?.deadline;
+        Ok((d != i64::MAX).then_some(d))
+    }
+
+    #[setter]
+    fn set_smc_deadline(&self, cycle: Option<i64>) -> PyResult<()> {
+        let r = self.rec(self.core()?)?;
+        (r.deadline, r.timed_out) = (cycle.unwrap_or(i64::MAX), false);
+        Ok(())
+    }
+
+    #[getter]
+    fn smc_timed_out(&self) -> PyResult<bool> {
+        Ok(self.rec(self.core()?)?.timed_out)
+    }
+
+    /// Attribute the last instruction's writes once a run is over.
+    fn smc_finish(&self) -> PyResult<()> {
+        let core = self.core()?;
+        if let Some(mut r) = core.s.rec.take() {
+            r.finish(&core.s);
+            core.s.rec = Some(r);
+        }
+        Ok(())
+    }
+
+    /// `(writer, writer opcode, role, timing, mapping, first)` of each distinct event, in
+    /// the order first seen.
+    #[allow(clippy::type_complexity)]
+    fn smc_events(
+        &self,
+    ) -> PyResult<
+        Vec<(
+            &'static str,
+            Option<u8>,
+            &'static str,
+            &'static str,
+            &'static str,
+            i64,
+        )>,
+    > {
+        Ok(self
+            .rec(self.core()?)?
+            .events
+            .iter()
+            .map(|e| {
+                let (w, op, role, timing, mapping) = e.fields();
+                (
+                    smc::WRITERS[w as usize],
+                    op,
+                    smc::ROLES[role as usize],
+                    smc::TIMINGS[timing as usize],
+                    smc::MAPPINGS[mapping as usize],
+                    e.first,
+                )
+            })
+            .collect())
+    }
+
+    /// `(count, sample)` of events the axes cannot express; the sample holds the first
+    /// `(kind, addr, role, pc)`.
+    #[allow(clippy::type_complexity)]
+    fn smc_unclassified(
+        &self,
+    ) -> PyResult<(u64, Vec<(&'static str, u16, Option<&'static str>, u16)>)> {
+        let r = self.rec(self.core()?)?;
+        let sample = r
+            .sample
+            .iter()
+            .map(|&(k, addr, role, pc)| {
+                (
+                    smc::UNCLASSIFIED[k as usize],
+                    addr,
+                    (k == smc::U_UNOWNED).then(|| smc::ROLES[role as usize]),
+                    pc,
+                )
+            })
+            .collect();
+        Ok((r.unclassified, sample))
     }
 }
 

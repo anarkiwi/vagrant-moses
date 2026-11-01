@@ -10,6 +10,7 @@ use crate::lines::{Lines, REU};
 use crate::reu::{Port, Reu};
 use crate::sched::{Sched, E_BADLINE, E_CLEAR_INT, E_EDGE, E_VIC, PHI1};
 use crate::sid::SidShared;
+use crate::smc::Recorder;
 use crate::vic::Vic;
 
 pub const IO: u8 = 255;
@@ -91,6 +92,8 @@ pub struct Sys {
     pub dma: bool,
     /// The instruction being executed is a read-modify-write.
     pub rmw: bool,
+    /// The SMC recorder, when armed.
+    pub rec: Option<Box<Recorder>>,
 }
 
 impl Sys {
@@ -306,7 +309,11 @@ impl<H: Host> Port for BusRef<'_, H> {
         if self.s.io && addr >> 12 == 0xD {
             self.s.io_write(self.h, addr, value);
         } else {
-            self.s.img[RAM][addr as usize] = value;
+            let s = &mut *self.s;
+            let old = std::mem::replace(&mut s.img[RAM][addr as usize], value);
+            if let Some(r) = s.rec.as_deref_mut() {
+                r.dma(addr, old, value, s.bits);
+            }
         }
     }
 }
@@ -325,6 +332,10 @@ impl<H: Host> Bus for BusRef<'_, H> {
 
     #[inline(always)]
     fn write(&mut self, addr: u16, v: u8) {
-        self.s.wr(addr, v)
+        let s = &mut *self.s;
+        if let Some(r) = s.rec.as_deref_mut() {
+            r.note(addr, s.img[RAM][addr as usize], false);
+        }
+        s.wr(addr, v)
     }
 }

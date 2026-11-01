@@ -167,9 +167,10 @@ def _native_layouts():
     ]
 
 
-def _rom_images():
-    """BASIC, CHARGEN and KERNAL as 64 KiB images, as :class:`~vagrant_moses.bus.Bus` keeps them."""
-    roms = rom_less()
+def _rom_images(roms: Optional[Dict[int, bytes]] = None):
+    """BASIC, CHARGEN and KERNAL as 64 KiB images, as :class:`~vagrant_moses.bus.Bus` keeps them;
+    ``roms`` (base -> bytes) overrides the ROM-less set per ROM."""
+    roms = {**rom_less(), **(roms or {})}
     images = []
     for base in (mm.BASIC_BASE, mm.CHARGEN_BASE, mm.KERNAL_BASE):
         image = bytearray(0x10000)
@@ -203,7 +204,8 @@ class Machine(Bus):
     and ``write(cycle, reg, value)``, or to a :class:`NativeSid`, which the native machine
     logs without calling Python except for ``$D419-$D41C``; the ``$D400`` device answers the
     rest of ``$D400-$D7FF``. ``on_event(cycle, name)`` gets each raise, entry and RTI.
-    ``reu`` is the size in KiB of a 17xx REU at ``$DF00`` (``None``: none).
+    ``reu`` is the size in KiB of a 17xx REU at ``$DF00`` (``None``: none). ``roms`` maps a
+    ROM base to its bytes and overrides sidplayfp's ROM-less set per ROM.
     """
 
     # pylint: disable=too-many-instance-attributes
@@ -218,6 +220,7 @@ class Machine(Bus):
         on_event: Optional[Callable[[int, str], None]] = None,
         backend: Optional[str] = None,
         reu: Optional[int] = None,
+        roms: Optional[Dict[int, bytes]] = None,
         **_kwargs,
     ):
         """The native machine for ``backend="native"`` (the default when ``_core``
@@ -237,7 +240,7 @@ class Machine(Bus):
             on_event,
             _native_layouts(),
             bytes(poweron_ram()),
-            _rom_images(),
+            _rom_images(roms),
             lines,
             cycles_per_line,
             reu,
@@ -251,12 +254,13 @@ class Machine(Bus):
         on_event: Optional[Callable[[int, str], None]] = None,
         backend: Optional[str] = None,
         reu: Optional[int] = None,
+        roms: Optional[Dict[int, bytes]] = None,
     ):
         del backend
         mpu_cls = _jennings()[0]
         if Machine.LAYOUTS is None:
             Machine.LAYOUTS = _layouts()
-        super().__init__()
+        super().__init__(roms=roms)
         self.ntsc = ntsc
         self.sched = Scheduler()
         self.vic = Vic(self.sched, ntsc, self._vic_irq, self._set_ba)

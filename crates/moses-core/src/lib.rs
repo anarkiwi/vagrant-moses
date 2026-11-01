@@ -7,9 +7,11 @@ pub mod machine;
 pub mod reu;
 pub mod sched;
 pub mod sid;
+pub mod smc;
 pub mod sys;
 pub mod vic;
 
 pub use machine::{Config, Core, Layout, Watch};
 pub use sid::{SidShared, SidState};
+pub use smc::Recorder;
 pub use sys::{Host, SidDev};
