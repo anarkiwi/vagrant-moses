@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use jennings_core::Bus;
 
 use crate::cia::Cia;
-use crate::lines::Lines;
+use crate::lines::{Lines, REU};
+use crate::reu::{Port, Reu};
 use crate::sched::{Sched, E_BADLINE, E_CLEAR_INT, E_EDGE, E_VIC, PHI1};
 use crate::vic::Vic;
 
@@ -75,6 +76,12 @@ pub struct Sys {
     pub events: Vec<(i64, u8)>,
     pub custom_sink: bool,
     pub port_dirty: bool,
+    /// The REU at `$DF00`, out of its slot while it runs a DMA cycle.
+    pub reu: Option<Box<Reu>>,
+    /// A DMA is pending or running: the CPU halts at its next read cycle.
+    pub dma: bool,
+    /// The instruction being executed is a read-modify-write.
+    pub rmw: bool,
 }
 
 impl Sys {
@@ -133,9 +140,41 @@ impl Sys {
         })
     }
 
+    /// Pass the REU's IRQ line on to the interrupt lines when it changed.
+    pub fn reu_line(&mut self) {
+        if let Some(r) = self.reu.as_mut() {
+            if r.line != r.signalled {
+                r.signalled = r.line;
+                self.ln.irq(&mut self.sched, r.line, REU);
+            }
+        }
+    }
+
+    fn reu_read(&mut self, addr: u16) -> Option<u8> {
+        if addr >> 8 != 0xDF {
+            return None;
+        }
+        let v = self.reu.as_mut()?.read(addr);
+        self.reu_line();
+        v
+    }
+
+    /// One DMA cycle of the REU with BA `ba`; true when the CPU runs this cycle.
+    pub fn reu_step<H: Host>(&mut self, h: &mut H, ba: bool) -> bool {
+        let Some(mut reu) = self.reu.take() else {
+            return true;
+        };
+        let go = reu.step(ba, &mut BusRef { s: self, h });
+        self.reu = Some(reu);
+        self.reu_line();
+        go
+    }
+
     pub fn io_read<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
         let page = addr >> 8;
-        let value = if page < 0xD4 {
+        let value = if let Some(v) = self.reu_read(addr) {
+            v
+        } else if page < 0xD4 {
             self.vic.read(addr, &mut self.sched, &mut self.ln)
         } else if !(0xD8..0xDE).contains(&page) {
             match self.sid(addr) {
@@ -160,7 +199,12 @@ impl Sys {
 
     pub fn io_write<H: Host>(&mut self, h: &mut H, addr: u16, value: u8) {
         let page = addr >> 8;
-        if page < 0xD4 {
+        if page == 0xDF && (self.reu.is_some() || self.dma) {
+            if let Some(r) = self.reu.as_mut() {
+                self.dma |= r.write(addr, value);
+                self.reu_line();
+            }
+        } else if page < 0xD4 {
             self.vic.write(addr, value, &mut self.sched, &mut self.ln);
         } else if !(0xD8..0xDE).contains(&page) {
             if let Some(dev) = self.sid(addr) {
@@ -198,6 +242,13 @@ impl Sys {
             self.pending.push_back((addr, value));
             return;
         }
+        let mut value = value;
+        if addr == 0xFF00 && self.reu.as_ref().is_some_and(|r| r.armed) {
+            if self.rmw {
+                value = self.img[self.map[0xF] as usize][0xFF00];
+            }
+            self.dma |= self.reu.as_mut().is_some_and(|r| r.ff00());
+        }
         self.img[RAM][addr as usize] = value;
         if addr < 2 {
             if addr != 0 {
@@ -207,6 +258,24 @@ impl Sys {
             }
             self.remap();
             self.port_dirty = true;
+        }
+    }
+}
+
+impl<H: Host> Port for BusRef<'_, H> {
+    fn dma_read(&mut self, addr: u16) -> u8 {
+        if addr < 2 {
+            self.s.img[RAM][addr as usize]
+        } else {
+            self.s.rd(self.h, addr)
+        }
+    }
+
+    fn dma_write(&mut self, addr: u16, value: u8) {
+        if self.s.io && addr >> 12 == 0xD {
+            self.s.io_write(self.h, addr, value);
+        } else {
+            self.s.img[RAM][addr as usize] = value;
         }
     }
 }

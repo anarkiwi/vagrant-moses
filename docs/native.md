@@ -9,7 +9,7 @@ backend="native"|"python")` picks one, native when `_core` imports and the class
 
 | Path | Role |
 |---|---|
-| `crates/moses-core` | Pure Rust: scheduler, bus, CIA, VIC-II, interrupt lines, the cycle loop. No PyO3. |
+| `crates/moses-core` | Pure Rust: scheduler, bus, CIA, VIC-II, REU, interrupt lines, the cycle loop. No PyO3. |
 | `crates/moses-py` | PyO3 extension `vagrant_moses._core`: `Machine`, `Memory`, `Registers`, `Chip`. |
 | `tools/build_native.sh` | Build the extension next to the package for in-tree runs. |
 | `tools/diff_machines.py` | Differential run of random programs on both backends. |
@@ -22,7 +22,7 @@ pinned to a release tag in both crates' `Cargo.toml`.
 ## Semantics
 
 Everything is a transcription of the Python modules: `eventsched` (events are indices,
-the queue is a stable sorted array), `bus`, `vicii`, `cia` and `machine` (opcode layouts
+the queue is a stable sorted array), `bus`, `vicii`, `cia`, `reu` and `machine` (opcode layouts
 are passed in from `Machine.LAYOUTS`, so there is one table). VIC, CIA and the scheduler
 never call Python. SID devices (`read(cycle, reg)`, `write(cycle, reg, value)`) and
 `on_event(cycle, name)` are called with the GIL re-acquired at those events only, after
@@ -64,5 +64,6 @@ Python surface and hooks, and six differential programs. For the full gate:
 
 ```bash
 python tools/diff_machines.py --programs 500 --cycles 2000000
+python tools/vice_reu.py --programs 48 --write-fixture   # REU programs vs VICE x64sc
 python tools/bench_machine.py --seconds 20
 ```

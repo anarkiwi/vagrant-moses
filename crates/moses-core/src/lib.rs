@@ -4,6 +4,7 @@
 pub mod cia;
 pub mod lines;
 pub mod machine;
+pub mod reu;
 pub mod sched;
 pub mod sys;
 pub mod vic;

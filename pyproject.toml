@@ -30,6 +30,7 @@ cli = ["tqdm>=4"]
 cpu = ["jennings>=0.7.0"]
 dev = [
     "tqdm>=4",
+    "numpy>=1.26",
     "jennings>=0.7.0",
     "black>=24",
     "pylint>=3",

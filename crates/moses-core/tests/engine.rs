@@ -1,5 +1,6 @@
 //! The core on hand-assembled programs, with the cycle counts the 6510 documents.
 
+use moses_core::lines::{CIA, EV_ENTRY};
 use moses_core::machine::{BRK_LAYOUT, CLI, F, POPSR, R, RTI, SEI, W};
 use moses_core::{Config, Core, Host, Layout};
 
@@ -53,6 +54,10 @@ fn layouts() -> Vec<Layout> {
 }
 
 fn core(program: &[(u16, &[u8])]) -> Core {
+    core_with(program, None)
+}
+
+fn core_with(program: &[(u16, &[u8])], reu: Option<u32>) -> Core {
     let mut ram = image();
     let mut kernal = image();
     kernal[0xFFFE] = 0x00;
@@ -70,6 +75,7 @@ fn core(program: &[(u16, &[u8])]) -> Core {
         custom_sink: false,
         lines: 312,
         cycles_per_line: 63,
+        reu,
     })
 }
 
@@ -111,7 +117,11 @@ fn a_cia_timer_raises_its_irq_every_latch_plus_one_cycles() {
             .collect();
     assert!(raises.len() >= 5);
     assert!(raises.windows(2).all(|w| w[1] - w[0] == 0x1235));
-    let entries = c.s.events.iter().filter(|e| e.1 == 7).count();
+    let entries =
+        c.s.events
+            .iter()
+            .filter(|e| e.1 == EV_ENTRY + CIA as u8)
+            .count();
     assert_eq!(entries, raises.len() - usize::from(c.s.ln.pin));
 }
 
@@ -131,4 +141,27 @@ fn rdy_stalls_the_cpu_on_a_badline() {
     }
     // The same cycle count retires fewer instructions when BA is pulled low.
     assert!(busy.cpu.cycles < quiet.cpu.cycles - 400);
+}
+
+#[test]
+fn an_reu_copies_c64_memory_while_the_cpu_halts() {
+    let program = [
+        0xA9, 0x10, 0x8D, 0x03, 0xDF, // C64 base $1000
+        0xA9, 0x05, 0x8D, 0x07, 0xDF, // five bytes
+        0xA9, 0x00, 0x8D, 0x08, 0xDF, 0xA9, 0x90, 0x8D, 0x01, 0xDF, // execute C64 -> REU now
+        0xAD, 0x00, 0xDF, // status
+        0x8D, 0x00, 0x20, // store it at $2000
+        0x4C, 0x1A, 0x10,
+    ];
+    let mut c = core_with(&[(0x1000, &program)], Some(128));
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    c.run(&mut host, 2100);
+    let reu = c.s.reu.as_ref().unwrap();
+    assert_eq!(&reu.ram[..5], &program[..5]);
+    assert_eq!(c.s.img[0][0x2000], 0x40);
+    assert_eq!(
+        (reu.peek(2), reu.peek(3), reu.peek(4), reu.peek(7)),
+        (5, 0x10, 5, 1)
+    );
 }

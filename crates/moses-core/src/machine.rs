@@ -7,6 +7,7 @@ use jennings_core::{AddrSet, Cpu};
 
 use crate::cia::Cia;
 use crate::lines::{self, Lines, MAX};
+use crate::reu::Reu;
 use crate::sched::Sched;
 use crate::sys::{BusRef, Host, Sys, RAM};
 use crate::vic::Vic;
@@ -48,7 +49,6 @@ const SEI_BASE: i32 = 0x78 << 3;
 const IRQ_I: u8 = 0x04;
 const NMI_VECTOR: u16 = 0xFFFA;
 const IRQ_VECTOR: u16 = 0xFFFE;
-const EV_NMI_ENTRY_BASE: u8 = lines::EV_ENTRY;
 
 /// One opcode's cycles after its fetch (`Machine.LAYOUTS`).
 #[derive(Clone, Default)]
@@ -88,6 +88,8 @@ pub struct Config {
     pub custom_sink: bool,
     pub lines: i32,
     pub cycles_per_line: i32,
+    /// The size in KiB of an REU at `$DF00`, if any (one of [`crate::reu::SIZES`]).
+    pub reu: Option<u32>,
 }
 
 pub struct Core {
@@ -149,6 +151,9 @@ impl Core {
             events: Vec::new(),
             custom_sink: cfg.custom_sink,
             port_dirty: false,
+            reu: cfg.reu.and_then(Reu::new).map(Box::new),
+            dma: false,
+            rmw: false,
         };
         s.remap();
         let mut layouts = cfg.layouts;
@@ -246,6 +251,7 @@ impl Core {
         self.base = base;
         self.idx = 0;
         self.rmw = kind == K_RMW;
+        self.s.rmw = self.rmw;
         if let Some((mask, want)) = branch {
             self.taken = (self.cpu.p() & mask != 0) == want;
             let rel = self.s.rd(h, pc.wrapping_add(1));
@@ -366,9 +372,9 @@ impl Core {
                 self.s.ln.nmi = false;
                 self.s.ln.calc();
                 let name = if nmi {
-                    EV_NMI_ENTRY_BASE + 1
+                    lines::EV_ENTRY + lines::NMI as u8
                 } else if self.d1x1 {
-                    EV_NMI_ENTRY_BASE + 2 + (self.s.ln.irq_cause - lines::VIDEO) as u8
+                    lines::EV_ENTRY + self.s.ln.irq_cause as u8
                 } else {
                     lines::EV_BRK_ENTRY
                 };
@@ -416,10 +422,19 @@ impl Core {
             }
             let kind = self.layouts[self.layout].ents[self.idx as usize];
             self.s.sched.now = t2 + 1;
-            if kind >= R && !self.s.ln.rdy {
-                self.stall(self.base + self.idx);
-                t += 1;
-                continue;
+            if kind >= R && (!self.s.ln.rdy || self.s.dma) {
+                let mut go = false;
+                if self.s.dma {
+                    self.s.ln.cc = self.base + self.idx;
+                    go = self.s.reu_step(h, !self.s.ln.rdy);
+                    self.s.dma = !go;
+                    self.s.flush(h);
+                }
+                if !go {
+                    self.stall(self.base + self.idx);
+                    t += 1;
+                    continue;
+                }
             }
             self.idx += 1;
             self.s.ln.cc = self.base + self.idx;

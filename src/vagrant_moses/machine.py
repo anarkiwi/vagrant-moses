@@ -14,6 +14,7 @@ from .bus import Bus
 from .c64 import poweron_ram
 from .roms import rom_less
 from .cia import Cia
+from .reu import Reu
 from .eventsched import PHI1, Event, Scheduler
 from .vicii import Vic
 
@@ -32,8 +33,9 @@ BRK_ENTRIES = (BRK0, PUSHPCH, LOWPC, PUSHSR, VECLO, VECHI, FN)
 _ANE_MAGIC = 0xEF
 _CLI_BASE, _SEI_BASE = 0x58 << 3, 0x78 << 3
 _IRQ_I = 0x04
-SOURCES = ("nmi", "video_irq", "cia_irq")
-_NMI, _VIDEO, _CIA = range(3)
+SOURCES = ("nmi", "video_irq", "cia_irq", "reu_irq")
+_NMI, _VIDEO, _CIA, _REU = range(4)
+_IRQS = (_VIDEO, _CIA, _REU)
 
 _READ_OPS = frozenset(
     "ADC AND CMP EOR LDA LDX LDY ORA SBC BIT CPX CPY LAX LAS ANC ALR ARR ANE LXA "
@@ -198,6 +200,7 @@ class Machine(Bus):
     ``sids`` maps a 32-byte-aligned I/O base to a device with ``read(cycle, reg)``
     and ``write(cycle, reg, value)``; the ``$D400`` device answers the rest of
     ``$D400-$D7FF``. ``on_event(cycle, name)`` gets each raise, entry and RTI.
+    ``reu`` is the size in KiB of a 17xx REU at ``$DF00`` (``None``: none).
     """
 
     # pylint: disable=too-many-instance-attributes
@@ -211,6 +214,7 @@ class Machine(Bus):
         cia_new: bool = False,
         on_event: Optional[Callable[[int, str], None]] = None,
         backend: Optional[str] = None,
+        reu: Optional[int] = None,
         **_kwargs,
     ):
         """The native machine for ``backend="native"`` (the default when ``_core``
@@ -233,6 +237,7 @@ class Machine(Bus):
             _rom_images(),
             lines,
             cycles_per_line,
+            reu,
         )
 
     def __init__(
@@ -242,6 +247,7 @@ class Machine(Bus):
         cia_new: bool = False,
         on_event: Optional[Callable[[int, str], None]] = None,
         backend: Optional[str] = None,
+        reu: Optional[int] = None,
     ):
         del backend
         mpu_cls = _jennings()[0]
@@ -261,7 +267,13 @@ class Machine(Bus):
         )
         self.colour = bytearray(0x400)
         self.seed = 3686734
-        self.asserted = [False, False, False]
+        self.asserted = [False] * len(SOURCES)
+        self.dma = False
+        self.reu = (
+            None
+            if reu is None
+            else Reu(reu, self, lambda on: self._irq(on, _REU), self._request)
+        )
         self.irq_cause = _CIA
         self.irq_count = 0
         self.ic, self.pin, self.nmi, self.iflag, self.rdy = (
@@ -300,7 +312,28 @@ class Machine(Bus):
         if self.io and addr >> 12 == 0xD:
             self.pending.append((addr, value))
             return
+        if addr == 0xFF00 and self.reu is not None and self.reu.armed:
+            if self.rmw:
+                value = self[addr]
+            self.reu.ff00()
         super().__setitem__(addr, value)
+
+    def dma_read(self, addr: int) -> int:
+        """A DMA read: as the CPU's, but ``$00``/``$01`` are the RAM under the port."""
+        if addr < 2:
+            return self.ram[addr]
+        page = self.pages[addr >> 12]
+        return page[addr] if page is not None else self.io_read(addr)
+
+    def dma_write(self, addr: int, value: int) -> None:
+        """A DMA write: the I/O page now, else RAM (also under the port and ROMs)."""
+        if self.io and addr >> 12 == 0xD:
+            self.io_write(addr, value)
+        else:
+            self.ram[addr] = value
+
+    def _request(self) -> None:
+        self.dma = True
 
     def _sid(self, addr: int):
         dev = self.sids.get(addr & 0xFFE0)
@@ -314,7 +347,10 @@ class Machine(Bus):
             value = self.vic.read(addr)
         elif page < 0xD8 or page >= 0xDE:
             dev = self._sid(addr)
-            if dev is None:
+            reu = self.reu.read(addr) if page == 0xDF and self.reu else None
+            if reu is not None:
+                value = reu
+            elif dev is None:
                 self.seed = (self.seed * 1664525 + 1013904223) & 0xFFFFFFFF
                 value = self.seed & 0xFF
             else:
@@ -330,6 +366,8 @@ class Machine(Bus):
         page = addr >> 8
         if page < 0xD4:
             self.vic.write(addr, value)
+        elif page == 0xDF and self.reu is not None:
+            self.reu.write(addr, value)
         elif page < 0xD8 or page >= 0xDE:
             dev = self._sid(addr)
             if dev is not None:
@@ -342,7 +380,7 @@ class Machine(Bus):
     # --- interrupt lines -------------------------------------------------------
 
     def _mark(self, kind: int) -> None:
-        if kind != _NMI and not self.asserted[_VIDEO] and not self.asserted[_CIA]:
+        if kind != _NMI and not any(self.asserted[k] for k in _IRQS):
             self.irq_cause = kind
         self.asserted[kind] = True
         self.on_event(self.sched.time(PHI1), SOURCES[kind])
@@ -356,8 +394,8 @@ class Machine(Bus):
             self.irq_count += 1
         else:
             self.asserted[kind] = False
-            other = _VIDEO if kind == _CIA else _CIA
-            if self.asserted[other]:
+            other = next((k for k in _IRQS if k != kind and self.asserted[k]), None)
+            if other is not None:
                 self.irq_cause = other
             self.irq_count -= 1
             if not self.irq_count:
@@ -524,12 +562,17 @@ class Machine(Bus):
                 self.cc = self.base + self.idx
                 sched.run(t2)
             kind = self.ents[self.idx]
-            if kind >= R and not self.rdy:
-                sched.now = t2 + 1
-                self._stall(self.base + self.idx)
-                t += 1
-                continue
             sched.now = t2 + 1
+            if kind >= R and (not self.rdy or self.dma):
+                go = False
+                if self.dma:
+                    self.cc = self.base + self.idx
+                    go = self.reu.step(not self.rdy)
+                    self.dma = not go
+                if not go:
+                    self._stall(self.base + self.idx)
+                    t += 1
+                    continue
             self.idx += 1
             self.cc = self.base + self.idx
             if kind == R:
