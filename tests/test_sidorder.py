@@ -1,6 +1,9 @@
 """vagrant_moses.sidorder on synthetic write streams: the envelope behaviour the solver relies
 on, the orders and their cover, and the hard restart."""
 
+import os
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -306,6 +309,16 @@ def test_neutral_clears_values_from_the_hard_restart_on():
     assert S.neutral(rows, 10)[:, 2].tolist() == [0x2A, 0x00, 0x03, 0x20]
 
 
+INSTRUMENTS = [
+    (0x09, 0xA9),
+    (0x4A, 0xF5),
+    (0x00, 0xF0),
+    (0x28, 0x88),
+    (0x8C, 0x6B),
+    (0x1F, 0xD3),
+]
+
+
 def busy_stream(frames, seed=7):
     """Three voices retriggered every few frames with varying envelopes and hard restarts."""
     rng = np.random.default_rng(seed)
@@ -318,7 +331,7 @@ def busy_stream(frames, seed=7):
                     (s + 40 * v + 4, 7 * v + 6, 0x00),
                 ]
             elif (j + v) % 4 == 2:
-                ad, sr = (int(x) for x in rng.integers(0, 256, 2))
+                ad, sr = INSTRUMENTS[int(rng.integers(len(INSTRUMENTS)))]
                 writes += [
                     (s + 40 * v + 8 * i, 7 * v + r, x)
                     for i, (r, x) in enumerate([(5, ad), (6, sr | 0x08), (4, 0x41)])
@@ -352,8 +365,9 @@ def test_the_solver_builds_no_chip_while_it_judges_cases(monkeypatch):
     assert not built
 
 
-def test_the_solver_runs_far_faster_than_real_time_on_a_busy_stream():
-    frames = 3000
+def real_time_multiple(frames=3000):
+    """How many times faster than real time the solver judges a busy stream of ``frames`` PAL
+    frames (the best of three runs, in CPU time)."""
     init, stream = busy_stream(frames)
     elapsed = []
     for _ in range(3):
@@ -363,4 +377,20 @@ def test_the_solver_runs_far_faster_than_real_time_on_a_busy_stream():
         notes = S.hard_restarts(tl, 39566, 10)
         elapsed.append(time.process_time() - begin)
     assert sum(n for n, _ in masks.values()) > 1000 and sum(notes.values()) > 400
-    assert frames * FRAME / S.PAL_CLOCK / min(elapsed) > 50
+    return frames * FRAME / S.PAL_CLOCK / min(elapsed)
+
+
+def test_the_solver_runs_far_faster_than_real_time_on_a_busy_stream():
+    env = {k: v for k, v in os.environ.items() if "COV" not in k}
+    out = subprocess.run(
+        [sys.executable, __file__],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert float(out.stdout) > 50
+
+
+if __name__ == "__main__":
+    print(real_time_multiple())

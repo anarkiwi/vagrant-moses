@@ -11,6 +11,7 @@ Input is a write stream as :meth:`NativeSid.drain_writes` gives it: absolute
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter
 from functools import lru_cache
 from itertools import combinations, permutations
@@ -101,7 +102,12 @@ def keeps_of(ctrl: tuple, ad: tuple, sr: tuple) -> list:
     """What each order of :data:`ORDERS` keeps, from the last two control, last AD and last two
     SR values written."""
     last = {4: ctrl, 5: ad, 6: sr}
-    return [tuple(pick(last, order)) for order in ORDERS]
+    got = {
+        item: (reg, last[reg][k])
+        for item, (reg, k) in PICK.items()
+        if len(last[reg]) >= -k
+    }
+    return [tuple(got[item] for item in order if item in got) for order in ORDERS]
 
 
 def all_keeps(last: dict) -> list:
@@ -264,7 +270,7 @@ class Timeline:
             for f, (_, w) in enumerate(frames)
             for v in range(3)
         }
-        self._native = {}
+        self._native, self._flat = {}, {}
         self.envs = [[] for _ in frames]
         for v in range(3):
             state = run(POWER_ON, voice_writes(self.init, v), self.starts[0], 0)[1]
@@ -276,6 +282,13 @@ class Timeline:
     def rel(self, f: int, v: int) -> np.ndarray:
         """Voice ``v``'s control, AD and SR writes of frame ``f``, relative to the voice."""
         return self._rel[f, v]
+
+    def flat(self, f: int, v: int) -> bytes:
+        """Voice ``v``'s frame-``f`` writes relative to the frame's start, as bytes."""
+        if (f, v) not in self._flat:
+            shift = np.array([self.starts[f], 0, 0], np.int64)
+            self._flat[f, v] = (self.rel(f, v) - shift).tobytes()
+        return self._flat[f, v]
 
     def native(self, f: int, v: int) -> tuple:
         """``(trace, end state)`` of voice ``v``'s native frame ``f``."""
@@ -414,10 +427,12 @@ def _mask(
 ) -> int:
     """:func:`order_masks`' mask of one case, through ``cache``."""
     shift = np.array([tl.starts[f], 0, 0], np.int64)
-    key = (tl.envs[f][v], (mine - shift).tobytes())
+    key = (tl.envs[f][v], tl.flat(f, v))
     if key in cache and not cache[key][1]:
         return cache[key][0]
-    tail = b"".join((tl.rel(g, v) - shift).tobytes() for g in range(f + 1, f + horizon))
+    tail = tuple(
+        (tl.starts[g] - tl.starts[f], tl.flat(g, v)) for g in range(f + 1, f + horizon)
+    )
     if (key, tail) in cache:
         return cache[key, tail][0]
     last, news, index, seen = (
@@ -490,11 +505,7 @@ def hard_restarts(  # pylint: disable=too-many-locals
             if len(ons) and not ctrl & GATE:
                 first = int(mine[0, 0])
                 held = first - since[v] if since[v] is not None else 0
-                begun = (
-                    int(np.searchsorted(tl.starts, since[v], side="right")) - 1
-                    if held
-                    else f
-                )
+                begun = bisect_right(tl.starts, since[v]) - 1 if held else f
                 neutral_values = None
                 if 0 <= begun and f - begun < 5:
                     cut = since[v] if held else first
