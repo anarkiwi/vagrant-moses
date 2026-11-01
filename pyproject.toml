@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vagrant-moses"
-version = "0.9.1"
+version = "0.9.2"
 description = "Standalone C64 machine model: memory map, banked bus and ROMs, VIC-II and CIAs over a two-phase scheduler, a cycle-exact 6510 machine, KERNAL traps, IRQ dispatch, and native d64/d71/d81/t64 media extraction"
 readme = "README.md"
 requires-python = ">=3.11"
