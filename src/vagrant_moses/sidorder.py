@@ -5,8 +5,8 @@ envelope, and the hard restart's settled state.
 
 Input is a write stream as :meth:`NativeSid.drain_writes` gives it: absolute
 ``(cycle, reg, value)``, split by :func:`split_frames` into the init writes and per-frame
-``(start, writes)``. The envelope is judged by pylibresidfp (the ``sidorder`` extra), imported
-on first use. See docs/sidorder.md.
+``(start, writes)``. The envelope is judged by pylibresidfp's chip-free ``envelope_run`` (the
+``sidorder`` extra), imported on first use. See docs/sidorder.md.
 """
 
 from __future__ import annotations
@@ -21,11 +21,9 @@ REGS = 25
 GATE, TEST = 0x01, 0x08
 SAW = 0x20
 RATE = 8000.0
-ENV = (
-    "envelope state next_state gate lfsr rate exponential_counter exponential_counter_period "
-    "counter_enabled state_pipeline envelope_pipeline exponential_pipeline reset_lfsr "
-    "attack decay sustain release"
-).split()
+POWER_ON = bytes.fromhex(
+    "ff7f7f000000000001000000000000000000000000000000000000000200000002000000010001aa0000000000"
+)
 PAL_CLOCK = 985248
 WRAP = 0x7FFF
 PICK = {
@@ -168,18 +166,26 @@ def ordered(w: np.ndarray, order: tuple) -> np.ndarray:
 
 
 def chip(clock: float = PAL_CLOCK, rate: float = RATE, method: str = "decimate"):
-    """A pylibresidfp chip; the default decimates to :data:`RATE`, enough for envelope work."""
+    """A pylibresidfp chip; the default decimates to :data:`RATE`, enough for envelope work. The
+    solver itself builds none."""
     from pylibresidfp import SID  # pylint: disable=import-outside-toplevel
 
     return SID(clock_hz=clock, sampling_hz=rate, method=method)
 
 
-def env_states(sid) -> list:
-    """Each voice's whole envelope state of ``sid`` as bytes: every field of
-    :data:`ENV`, so equal states with equal later writes have equal futures."""
-    v = sid.voices()
-    m = np.stack([v[k] for k in ENV])
-    return [m[:, i].tobytes() for i in range(3)]
+def run(state: bytes, writes: np.ndarray, until: int, start: int) -> tuple:
+    """``(envelope trace, end state)`` of a voice's envelope from ``state`` at cycle ``start`` to
+    ``until`` under voice-relative ``writes``."""
+    from pylibresidfp import envelope_run  # pylint: disable=import-outside-toplevel
+
+    return envelope_run(state, writes, until, start)
+
+
+def runs(state: bytes, candidates: list, until: int, start: int) -> list:
+    """:func:`run` of each of ``candidates`` from the same ``state``, in one call."""
+    from pylibresidfp import envelope_runs  # pylint: disable=import-outside-toplevel
+
+    return envelope_runs(state, candidates, until, start)
 
 
 def same(a, b) -> bool:
@@ -211,11 +217,14 @@ def compare(a: np.ndarray, b: np.ndarray, clock: float = PAL_CLOCK) -> dict:
 def settle_cycles(clock: float = PAL_CLOCK) -> int:
     """The most cycles a hard restart (gate off, release rate 0) takes to leave a voice in the
     same state whatever came before: a full wrap of the rate counter, during which the envelope
-    does not step, then the release from the highest level to 0 at rate 0."""
-    sid = chip(clock)
-    sid.trace([(1, 5, 0x00), (2, 6, 0xF0), (3, 4, SAW | GATE)], 2 * 19656)
-    start = sid.cycle
-    trace = sid.envelope_trace(0, [(start, 6, 0x00), (start, 4, SAW)], start + 19656)
+    does not step, then the release from the highest level to 0 at rate 0. The envelope does not
+    depend on ``clock``."""
+    del clock
+    note = np.array([(1, 5, 0x00), (2, 6, 0xF0), (3, 4, SAW | GATE)], np.int64)
+    state = run(POWER_ON, note, 2 * 19656, 0)[1]
+    start = 2 * 19656
+    stop = np.array([(start, 6, 0x00), (start, 4, SAW)], np.int64)
+    trace = run(state, stop, start + 19656, start)[0]
     silent = trace.cycle[trace.envelope == 0]
     return WRAP + int(silent[0] - start)
 
@@ -239,69 +248,56 @@ def registers(init: np.ndarray) -> np.ndarray:
 
 
 class Timeline:
-    """A write stream's chip state at every frame start, for judging what a change to one
+    """A write stream's envelope states at every frame start, for judging what a change to one
     voice's writes in one frame does to its envelope.
 
-    One chip plays the whole stream once; its state is kept per frame and restored into scratch
-    chips on demand, and a change is judged frame by frame from its frame until its envelope
-    state equals the native one at a frame end, when the same later writes give the same
-    future."""
+    Each voice's envelope generator is stepped alone, frame by frame, from power-on through the
+    init writes; its state is kept per frame start. A change is judged from its frame's start
+    state frame by frame until its envelope state equals the native one at a frame end, when the
+    same later writes give the same future. No chip is involved."""
 
-    def __init__(self, init, frames: list, clock: float = PAL_CLOCK, **chip_args):
+    def __init__(self, init, frames: list, clock: float = PAL_CLOCK):
         self.init, self.frames, self.clock = np.asarray(init), frames, clock
-        self.audio = bool(chip_args)
         self.starts = [s for s, _ in frames]
-        self.scratch = [chip(clock, **chip_args) for _ in range(3)]
-        sid = chip(clock, **chip_args)
-        sid.trace(
-            self.envelope_writes(self.init[self.init[:, 0] >= sid.cycle]),
-            self.starts[0],
-        )
-        self.snaps, self.envs, self._rel, self._clean = [], [], {}, None
-        for (_, w), end in zip(frames, [*self.starts[1:], None]):
-            self.snaps.append(sid.save_state())
-            self.envs.append(env_states(sid))
-            if end is not None:
-                sid.trace(self.envelope_writes(w), end)
-
-    def envelope_writes(self, w: np.ndarray) -> np.ndarray:
-        """The control, AD and SR writes of ``w`` of all voices, a control write by its gate and
-        test bits alone (the oscillators then cost nothing to clock), unless audio is wanted.
-        """
-        if self.audio:
-            return w
-        out = w[(w[:, 1] < 21) & (w[:, 1] % 7 >= 4)].copy()
-        ctrl = out[:, 1] % 7 == 4
-        out[ctrl, 2] &= GATE | TEST
-        return out
+        self._rel = {
+            (f, v): voice_writes(w, v)
+            for f, (_, w) in enumerate(frames)
+            for v in range(3)
+        }
+        self._native = {}
+        self.envs = [[] for _ in frames]
+        for v in range(3):
+            state = run(POWER_ON, voice_writes(self.init, v), self.starts[0], 0)[1]
+            for f in range(len(frames)):
+                self.envs[f].append(state)
+                if f + 1 < len(frames):
+                    state = self.native(f, v)[1]
 
     def rel(self, f: int, v: int) -> np.ndarray:
         """Voice ``v``'s control, AD and SR writes of frame ``f``, relative to the voice."""
-        if (f, v) not in self._rel:
-            self._rel[f, v] = voice_writes(self.frames[f][1], v)
         return self._rel[f, v]
 
-    def at(self, slot: int, g: int):
-        """Scratch chip ``slot`` restored to the start of frame ``g``."""
-        sid = self.scratch[slot]
-        if slot or self._clean != g:
-            sid.restore_state(self.snaps[g])
-            self._clean = g if not slot else self._clean
-        return sid
+    def native(self, f: int, v: int) -> tuple:
+        """``(trace, end state)`` of voice ``v``'s native frame ``f``."""
+        if (f, v) not in self._native:
+            self._native[f, v] = run(
+                self.envs[f][v], self.rel(f, v), self.starts[f + 1], self.starts[f]
+            )
+        return self._native[f, v]
 
     def agree(self, v: int, writes_a: list, writes_b: list, lo: int, stop: int) -> bool:
         """Whether voice ``v``'s envelope is identical through frames ``lo`` on, playing
         ``writes_a`` and ``writes_b`` (voice-relative writes per frame) from the state at the
         start of ``lo``; the same later writes from a frame end at or after ``stop`` on equal
         states decide it."""
-        chips_ = [self.at(1, lo), self.at(2, lo)]
-        for g, (wa, wb) in enumerate(zip(writes_a, writes_b), lo):
-            end, ws = self.starts[g + 1], (absolute(wa, v), absolute(wb, v))
-            if not same(*(c.envelope_trace(v, w, end) for c, w in zip(chips_, ws))):
+        states = [self.envs[lo][v]] * 2
+        for g, ws in enumerate(zip(writes_a, writes_b), lo):
+            end = self.starts[g + 1]
+            out = [run(s, w, end, self.starts[g]) for s, w in zip(states, ws)]
+            if not same(out[0][0], out[1][0]):
                 return False
-            for c, w in zip(chips_, ws):
-                c.trace(w, end)
-            if g >= stop and env_states(chips_[0])[v] == env_states(chips_[1])[v]:
+            states = [o[1] for o in out]
+            if g >= stop and states[0] == states[1]:
                 return True
         return True
 
@@ -309,41 +305,34 @@ class Timeline:
         """Which of the voice-relative frame-``f`` writes ``news`` keep voice ``v``'s envelope
         identical to the native writes' over ``horizon`` frames, as ``{key: (verdict, whether
         the later frames' writes were needed)}``."""
-        until, native, out = self.starts[f + 1], self.rel(f, v), {}
-        clean = ref = None
-        for key, new in news.items():
-            if new is native:
-                out[key] = True, False
-                continue
-            if clean is None:
-                clean = self.at(0, f)
-                ref = clean.envelope_trace(v, absolute(native, v), until)
-            if not same(ref, clean.envelope_trace(v, absolute(new, v), until)):
-                out[key] = False, False
-                continue
-            sid = self.scratch[1]
-            sid.restore_state(self.snaps[f])
-            sid.trace(absolute(new, v), until)
-            if env_states(sid)[v] == self.envs[f + 1][v]:
-                out[key] = True, False
-            else:
-                out[key] = self._continue(sid, v, f + 1, horizon - 1), True
+        until, native = self.starts[f + 1], self.rel(f, v)
+        todo = [k for k, new in news.items() if new is not native]
+        out = {k: (True, False) for k in news if k not in todo}
+        if todo:
+            ref = self.native(f, v)[0]
+            found = runs(
+                self.envs[f][v], [news[k] for k in todo], until, self.starts[f]
+            )
+            for key, (trace, end) in zip(todo, found):
+                if not same(ref, trace):
+                    out[key] = False, False
+                elif end == self.envs[f + 1][v]:
+                    out[key] = True, False
+                else:
+                    out[key] = self._continue(end, v, f + 1, horizon - 1), True
         return out
 
-    def _continue(self, sid, v: int, g: int, frames: int) -> bool:
-        """Whether ``sid`` (a candidate, at the start of frame ``g``) keeps voice ``v``'s
+    def _continue(self, state: bytes, v: int, g: int, frames: int) -> bool:
+        """Whether a candidate in ``state`` at the start of frame ``g`` keeps voice ``v``'s
         envelope identical to the native one through ``frames`` frames or until their states
         are equal."""
-        native = self.scratch[2]
         for h in range(g, g + frames):
-            native.restore_state(self.snaps[h])
-            w, end = absolute(self.rel(h, v), v), self.starts[h + 1]
-            if not same(
-                native.envelope_trace(v, w, end), sid.envelope_trace(v, w, end)
-            ):
+            trace, state = run(
+                state, self.rel(h, v), self.starts[h + 1], self.starts[h]
+            )
+            if not same(self.native(h, v)[0], trace):
                 return False
-            sid.trace(w, end)
-            if env_states(sid)[v] == self.envs[h + 1][v]:
+            if state == self.envs[h + 1][v]:
                 return True
         return True
 
@@ -453,9 +442,9 @@ def _mask(
 def order_cases(tl: Timeline, order: tuple, horizon: int = 10):
     """Each (frame, voice) whose event pattern ``order`` changes, as ``(case, run)``: ``case``
     its frame, voice, native and ordered patterns and how the envelopes differ over that
-    frame and the ``horizon - 1`` after it (:func:`compare`); ``run`` the ``(state, native
-    writes, ordered writes, until)`` of the case, the state a chip's ``restore_state`` takes at
-    the frame's start."""
+    frame and the ``horizon - 1`` after it (:func:`compare`); ``run`` the ``(start, native
+    writes, ordered writes, until)`` of the case, the absolute writes of the voice's registers
+    from the frame's start cycle."""
     regs = registers(tl.init)
     for f in range(len(tl.frames) - horizon):
         for v in range(3):
@@ -466,10 +455,9 @@ def order_cases(tl: Timeline, order: tuple, horizon: int = 10):
             if new != native:
                 tail = [tl.rel(g, v) for g in range(f + 1, f + horizon)]
                 until = tl.starts[f + horizon]
-                a_w = absolute(np.concatenate([mine, *tail]), v)
-                b_w = absolute(np.concatenate([ordered(mine, order), *tail]), v)
-                sid = tl.at(0, f)
-                a, b = (sid.envelope_trace(v, w, until) for w in (a_w, b_w))
+                a_w = np.concatenate([mine, *tail])
+                b_w = np.concatenate([ordered(mine, order), *tail])
+                (a, _), (b, _) = runs(tl.envs[f][v], [a_w, b_w], until, tl.starts[f])
                 case = {
                     "frame": f,
                     "voice": v,
@@ -480,7 +468,7 @@ def order_cases(tl: Timeline, order: tuple, horizon: int = 10):
                 case |= compare(
                     levels(a, begin, until), levels(b, begin, until), tl.clock
                 )
-                yield case, (tl.snaps[f], a_w, b_w, until)
+                yield case, (begin, absolute(a_w, v), absolute(b_w, v), until)
         regs[tl.frames[f][1][:, 1]] = tl.frames[f][1][:, 2]
 
 

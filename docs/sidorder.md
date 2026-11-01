@@ -14,7 +14,7 @@ frames' start cycles:
 from vagrant_moses import sidorder as S
 
 init, frames = S.split_frames(writes, starts)      # init writes, [(start, writes[n, 3])]
-tl = S.Timeline(init, frames)                      # one chip pass; a state per frame start
+tl = S.Timeline(init, frames)                      # each voice's envelope state per frame start
 masks = S.order_masks(tl, horizon=10)              # {mask: (count, example pattern)}
 size, covers = S.covers(masks)                     # the exact minimum cover of orders
 notes = S.hard_restarts(tl, S.settle_cycles())     # {(settled, frames, neutral): count}
@@ -70,15 +70,18 @@ them for all its frames.
 
 ### How a case is judged
 
-`Timeline` plays the whole stream once and keeps the chip state at every frame start. A case is
-judged from the state at its frame start: the native and the reordered frame are traced in the
-frame and compared, then the voice's whole envelope state (every field libresidfp reports for it:
-level, state, LFSR, rate counter, exponential counter, pipelines, latched rates) at the frame end.
-Equal states with the same later writes have the same future, so that decides the case; otherwise
-it continues frame by frame up to `horizon`, stopping at the first frame end where the states are
-equal. Cases with the same envelope state at the frame start, the same frame writes relative to
-the start and the same candidate are judged once (and, where the later frames' writes were needed,
-with those writes).
+A voice's envelope generator is independent of the oscillators and the filter, and only the
+voice's own control, AD and SR writes reach it. `Timeline` steps each voice's generator alone
+(pylibresidfp's `envelope_run`, which jumps idle stretches to the next rate-counter match or write)
+from power-on through the init writes and frame by frame, keeping its serialised state at every
+frame start. A case is judged from that state: the native and the reordered frame (all
+candidates of a case in one `envelope_runs` call) are traced in the frame and compared, then the
+voice's whole envelope state (every field libresidfp keeps for it) at the frame end. Equal states
+with the same later writes have the same future, so that decides the case; otherwise it continues
+frame by frame up to `horizon`, stopping at the first frame end where the states are equal. Cases
+with the same envelope state at the frame start, the same frame writes relative to the start and
+the same candidate are judged once (and, where the later frames' writes were needed, with those
+writes).
 
 ## Hard restart
 
@@ -87,7 +90,7 @@ has lasted a full rate-counter wrap (32767 cycles, during which the envelope doe
 release from the highest level to 0 at rate 0, the voice is in the same state whatever came before:
 the envelope at 0 and the rate counter in rate 0's nine-state cycle. A PAL frame is 9 x 2184
 cycles, so longer hard restarts change nothing more. `settle_cycles(clock)` measures that bound on
-the chip (39566 for PAL), and `hard_restarts` classes each note-on by the whole frames of hard
+the envelope (39566 for PAL), and `hard_restarts` classes each note-on by the whole frames of hard
 restart before its frame and whether that reaches the bound.
 
 Most notes in tunes have a shorter hard restart (or none), so their attack depends on the note
@@ -100,6 +103,6 @@ uses the AD and SR the hard restart left.
 ## Other entry points
 
 - `order_cases(tl, order)`: each (frame, voice) an order changes, with how long and by how much the
-  envelopes differ (`compare`), and the state and writes to render them. Build the `Timeline` with
-  `rate=44100.0, method="resample"` to render audio from that state.
+  envelopes differ (`compare`), and the frame's start cycle and the voice's absolute writes to
+  render them: a caller that wants audio plays the stream on its own chip to that cycle.
 - `pattern_changes(init, frames)`: per order, how many cases change an event pattern; no chip.

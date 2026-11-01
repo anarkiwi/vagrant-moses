@@ -278,10 +278,10 @@ def test_order_cases_compare_the_envelopes_an_order_changes():
     tl = S.Timeline(init, frames)
     cases = list(S.order_cases(tl, S.CANONICAL[0], 3))
     assert [c["voice"] for c, _ in cases] == [0]
-    case, (state, native, new, until) = cases[0]
+    case, (start, native, new, until) = cases[0]
     assert case["ms"] > 0 and case["dbfs"] < 0 and case["native"] != case["ordered"]
     assert (
-        until == tl.starts[3] and len(native) == len(new) == 4 and state == tl.snaps[0]
+        until == tl.starts[3] and len(native) == len(new) == 4 and start == tl.starts[0]
     )
     same_order = list(S.order_cases(tl, S.CANONICAL[2], 3))
     assert same_order == []
@@ -326,11 +326,16 @@ def busy_stream(frames, seed=7):
     return S.split_frames(writes, starts)
 
 
+def test_power_on_state_is_a_fresh_chips():
+    sid = S.chip()
+    assert {sid.envelope_state(v) for v in range(3)} == {S.POWER_ON}
+    sid.write(5, 0x44)
+    assert sid.envelope_state(0) != S.POWER_ON
+
+
 def test_the_solver_builds_no_chip_while_it_judges_cases(monkeypatch):
     import pylibresidfp  # pylint: disable=import-outside-toplevel
 
-    init, frames = busy_stream(120)
-    tl = S.Timeline(init, frames)
     built = []
     real = pylibresidfp.SID.__init__
     monkeypatch.setattr(
@@ -338,18 +343,24 @@ def test_the_solver_builds_no_chip_while_it_judges_cases(monkeypatch):
         "__init__",
         lambda self, *a, **k: built.append(1) or real(self, *a, **k),
     )
+    init, frames = busy_stream(120)
+    tl = S.Timeline(init, frames)
     masks = S.order_masks(tl, 10)
-    notes = S.hard_restarts(tl, 39566, 10)
-    assert sum(n for n, _ in masks.values()) > 30 and sum(notes.values()) > 15
+    notes = S.hard_restarts(tl, S.settle_cycles(), 10)
+    cases = list(S.order_cases(tl, S.CANONICAL[0], 10))
+    assert sum(n for n, _ in masks.values()) > 30 and sum(notes.values()) > 15 and cases
     assert not built
 
 
-def test_the_solver_is_fast_on_a_busy_stream():
-    init, frames = busy_stream(400)
-    begin = time.perf_counter()
-    tl = S.Timeline(init, frames)
-    masks = S.order_masks(tl, 10)
-    notes = S.hard_restarts(tl, 39566, 10)
-    elapsed = time.perf_counter() - begin
-    assert sum(n for n, _ in masks.values()) > 100 and sum(notes.values()) > 50
-    assert elapsed < 10
+def test_the_solver_runs_far_faster_than_real_time_on_a_busy_stream():
+    frames = 3000
+    init, stream = busy_stream(frames)
+    elapsed = []
+    for _ in range(3):
+        begin = time.process_time()
+        tl = S.Timeline(init, stream)
+        masks = S.order_masks(tl, 10)
+        notes = S.hard_restarts(tl, 39566, 10)
+        elapsed.append(time.process_time() - begin)
+    assert sum(n for n, _ in masks.values()) > 1000 and sum(notes.values()) > 400
+    assert frames * FRAME / S.PAL_CLOCK / min(elapsed) > 50
