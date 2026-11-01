@@ -28,9 +28,13 @@ vagrant-moses = "vagrant_moses.cli:main"
 cli = ["tqdm>=4"]
 # The cycle-exact Machine, flat_mpu and KernalHost step a jennings 6510.
 cpu = ["jennings>=0.7.0"]
+# vagrant_moses.sidorder judges envelopes with libresidfp.
+sidorder = ["numpy>=1.23", "pylibresidfp>=0.3.1"]
 dev = [
     "tqdm>=4",
     "jennings>=0.7.0",
+    "numpy>=1.23",
+    "pylibresidfp>=0.3.1",
     "black>=24",
     "pylint>=3",
     "pytest>=7",
