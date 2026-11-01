@@ -83,6 +83,30 @@ with the same envelope state at the frame start, the same frame writes relative 
 the same candidate are judged once (and, where the later frames' writes were needed, with those
 writes).
 
+## Order without the rate counter
+
+`vagrant_moses.sidspace` tests the envelope generator from first principles rather than from
+tunes. `starts` synthesises settled generator states field by field (every state, level, AD, SR
+and rate-counter phase; they equal the states the chip reaches itself), and pylibresidfp's
+`envelope_grid` runs every write program from every state natively, comparing level changes and
+the end state.
+
+An AD or SR write stores its nibbles and sets the rate for the state in force; the generator
+reads them only when its rate counter matches and at state changes. `no_match_orders` checks the
+consequence over the whole parameter space: from every state and level, with the rate counter
+matching nothing during the writes, every held and new value of AD (or SR) against sampled values
+of the other, every gate and test change and all six orders of the three writes, 1 or 4 cycles
+apart. No order changes the envelope or the generator's state in any of them. An order can
+therefore only change when a rate change takes effect, by at most the span of the frame's writes,
+and only where the rate counter matches inside that span: what a frame commands of a voice's
+envelope is its gate edges and the AD and SR in force at each edge and at the frame's end. One
+order, `sr,ad,ctrl` per gate segment, programs all of it; tunes measured so far have at most
+three gate edges per voice per frame. Test-bit edges do not reach the envelope but do reset the
+oscillator, so frames that pulse the test bit (sample playback) keep their own order.
+
+`python -m vagrant_moses.sidspace` runs every pass (minutes on a multicore host); rerun it when
+libresidfp changes.
+
 ## Hard restart
 
 A hard restart turns the gate off with SR's release nibble 0 some frames before a note. Once it
