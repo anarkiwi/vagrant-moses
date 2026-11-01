@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
+use moses_core::reu::{geometry, REGS, SIZES};
 use moses_core::{Config, Core, Host, Layout, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
@@ -248,7 +249,7 @@ pub struct Machine {
     owner: Owner,
     active: AtomicPtr<Core>,
     ntsc: bool,
-    views: [OnceLock<Py<Memory>>; 5],
+    views: [OnceLock<Py<Memory>>; 6],
 }
 
 // SAFETY: every access holds the GIL; while a run is detached, `owner` refuses all threads
@@ -277,7 +278,7 @@ impl Machine {
         unsafe { &mut *self.hooks.get() }
     }
 
-    /// The one view of memory `which` (0 RAM, 1 colour RAM, 2-4 BASIC/CHARGEN/KERNAL).
+    /// The one view of memory `which` (0 RAM, 1 colour RAM, 2-4 BASIC/CHARGEN/KERNAL, 5 REU).
     fn view(slf: &Bound<'_, Self>, which: u8) -> PyResult<Py<Memory>> {
         let cell = &slf.get().views[which as usize];
         if let Some(v) = cell.get() {
@@ -325,7 +326,7 @@ impl Machine {
 #[pymethods]
 impl Machine {
     #[new]
-    #[pyo3(signature = (ntsc, sids, cia_new, on_event, layouts, ram, roms, lines, cycles_per_line))]
+    #[pyo3(signature = (ntsc, sids, cia_new, on_event, layouts, ram, roms, lines, cycles_per_line, reu=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         ntsc: bool,
@@ -337,7 +338,13 @@ impl Machine {
         roms: (Vec<u8>, Vec<u8>, Vec<u8>),
         lines: i32,
         cycles_per_line: i32,
+        reu: Option<u32>,
     ) -> PyResult<Self> {
+        if let Some(kb) = reu.filter(|&kb| geometry(kb).is_none()) {
+            return Err(PyValueError::new_err(format!(
+                "REU size must be one of {SIZES:?} KiB, got {kb}"
+            )));
+        }
         let mut devs = Vec::new();
         let mut map = Vec::new();
         let mut logged = Vec::new();
@@ -373,6 +380,7 @@ impl Machine {
             custom_sink: on_event.is_some(),
             lines,
             cycles_per_line,
+            reu,
         };
         Ok(Machine {
             core: UnsafeCell::new(Box::new(Core::new(cfg))),
@@ -493,6 +501,14 @@ impl Machine {
                 k => Self::view(slf, if k == 0 { 0 } else { k + 1 }).map(Some),
             })
             .collect()
+    }
+
+    /// The REU at `$DF00`, or `None`.
+    #[getter]
+    fn reu(slf: &Bound<'_, Self>) -> PyResult<Option<Reu>> {
+        Ok(slf.get().core()?.s.reu.as_ref().map(|_| Reu {
+            machine: slf.clone().unbind(),
+        }))
     }
 
     #[getter]
@@ -758,6 +774,14 @@ impl Memory {
         let _ = py;
         Ok(match self.which {
             1 => (core.s.colour.as_mut_ptr(), 0x400),
+            5 => {
+                let reu = core
+                    .s
+                    .reu
+                    .as_mut()
+                    .ok_or_else(|| PyRuntimeError::new_err("the machine has no REU"))?;
+                (reu.ram.as_mut_ptr(), reu.ram.len())
+            }
             k => (
                 core.s.img[k.saturating_sub(1) as usize].as_mut_ptr(),
                 0x10000,
@@ -775,12 +799,8 @@ impl Memory {
 
 #[pymethods]
 impl Memory {
-    fn __len__(&self) -> usize {
-        if self.which == 1 {
-            0x400
-        } else {
-            0x10000
-        }
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        Ok(self.raw(py)?.1)
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -846,6 +866,64 @@ fn index(i: isize, len: usize) -> PyResult<usize> {
         .ok()
         .filter(|&j| j < len)
         .ok_or_else(|| PyIndexError::new_err("index out of range"))
+}
+
+/// The REU (`machine.reu`): its RAM and registers.
+#[pyclass(module = "vagrant_moses._core", name = "Reu", frozen)]
+pub struct Reu {
+    machine: Py<Machine>,
+}
+
+impl Reu {
+    fn get<T>(&self, f: impl FnOnce(&moses_core::reu::Reu) -> T) -> PyResult<T> {
+        let core = self.machine.get().core()?;
+        core.s
+            .reu
+            .as_deref()
+            .map(f)
+            .ok_or_else(|| PyRuntimeError::new_err("the REU is running a DMA cycle"))
+    }
+}
+
+#[pymethods]
+impl Reu {
+    /// The expansion RAM (bytearray-like, zero-copy).
+    #[getter]
+    fn ram(&self, py: Python<'_>) -> PyResult<Py<Memory>> {
+        Machine::view(self.machine.bind(py), 5)
+    }
+
+    /// Registers `$00-$0A` as `peek` reads them.
+    #[getter]
+    fn regs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let regs = self.get(|r| (0..REGS).map(|i| r.peek(i)).collect::<Vec<u8>>())?;
+        Ok(PyBytes::new(py, &regs))
+    }
+
+    /// Register `reg` without a read's side effects.
+    fn peek(&self, reg: u8) -> PyResult<u8> {
+        self.get(|r| r.peek(reg))
+    }
+
+    #[getter]
+    fn size_kb(&self) -> PyResult<u32> {
+        self.get(|r| r.size_kb)
+    }
+
+    #[getter]
+    fn armed(&self) -> PyResult<bool> {
+        self.get(|r| r.armed)
+    }
+
+    #[getter]
+    fn busy(&self) -> PyResult<bool> {
+        self.get(|r| r.busy)
+    }
+
+    #[getter]
+    fn latch(&self) -> PyResult<u8> {
+        self.get(|r| r.latch)
+    }
 }
 
 /// The CPU registers (`machine.mpu`).
@@ -961,6 +1039,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Machine>()?;
     m.add_class::<Memory>()?;
     m.add_class::<Registers>()?;
+    m.add_class::<Reu>()?;
     m.add_class::<Chip>()?;
     m.add_class::<NativeSid>()?;
     m.add_class::<WatchAll>()?;
