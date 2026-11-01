@@ -12,6 +12,7 @@ on first use. See docs/sidorder.md.
 from __future__ import annotations
 
 from collections import Counter
+from functools import lru_cache
 from itertools import combinations, permutations
 
 import numpy as np
@@ -97,6 +98,19 @@ def pick(last: dict, order: tuple) -> list:
     return out
 
 
+@lru_cache(maxsize=1 << 16)
+def keeps_of(ctrl: tuple, ad: tuple, sr: tuple) -> list:
+    """What each order of :data:`ORDERS` keeps, from the last two control, last AD and last two
+    SR values written."""
+    last = {4: ctrl, 5: ad, 6: sr}
+    return [tuple(pick(last, order)) for order in ORDERS]
+
+
+def all_keeps(last: dict) -> list:
+    """What each order of :data:`ORDERS` keeps of the writes whose :func:`lasts` is ``last``."""
+    return keeps_of(tuple(last[4][-2:]), tuple(last[5][-1:]), tuple(last[6][-2:]))
+
+
 def text(pattern: tuple) -> str:
     """A pattern readably: control writes as their gate and test bits (``g+t-``), AD and SR as
     ``a0A`` and ``s88``."""
@@ -170,9 +184,7 @@ def env_states(sid) -> list:
 
 def same(a, b) -> bool:
     """Whether two envelope traces are identical."""
-    return len(a) == len(b) and all(
-        np.array_equal(a[k], b[k]) for k in ("cycle", "envelope", "state")
-    )
+    return a.tobytes() == b.tobytes()
 
 
 def levels(trace, start: int, until: int) -> np.ndarray:
@@ -237,16 +249,31 @@ class Timeline:
 
     def __init__(self, init, frames: list, clock: float = PAL_CLOCK, **chip_args):
         self.init, self.frames, self.clock = np.asarray(init), frames, clock
+        self.audio = bool(chip_args)
         self.starts = [s for s, _ in frames]
         self.scratch = [chip(clock, **chip_args) for _ in range(3)]
         sid = chip(clock, **chip_args)
-        sid.trace(self.init[self.init[:, 0] >= sid.cycle], self.starts[0])
-        self.snaps, self.envs, self._rel = [], [], {}
+        sid.trace(
+            self.envelope_writes(self.init[self.init[:, 0] >= sid.cycle]),
+            self.starts[0],
+        )
+        self.snaps, self.envs, self._rel, self._clean = [], [], {}, None
         for (_, w), end in zip(frames, [*self.starts[1:], None]):
             self.snaps.append(sid.save_state())
             self.envs.append(env_states(sid))
             if end is not None:
-                sid.trace(w, end)
+                sid.trace(self.envelope_writes(w), end)
+
+    def envelope_writes(self, w: np.ndarray) -> np.ndarray:
+        """The control, AD and SR writes of ``w`` of all voices, a control write by its gate and
+        test bits alone (the oscillators then cost nothing to clock), unless audio is wanted.
+        """
+        if self.audio:
+            return w
+        out = w[(w[:, 1] < 21) & (w[:, 1] % 7 >= 4)].copy()
+        ctrl = out[:, 1] % 7 == 4
+        out[ctrl, 2] &= GATE | TEST
+        return out
 
     def rel(self, f: int, v: int) -> np.ndarray:
         """Voice ``v``'s control, AD and SR writes of frame ``f``, relative to the voice."""
@@ -257,7 +284,9 @@ class Timeline:
     def at(self, slot: int, g: int):
         """Scratch chip ``slot`` restored to the start of frame ``g``."""
         sid = self.scratch[slot]
-        sid.restore_state(self.snaps[g])
+        if slot or self._clean != g:
+            sid.restore_state(self.snaps[g])
+            self._clean = g if not slot else self._clean
         return sid
 
     def agree(self, v: int, writes_a: list, writes_b: list, lo: int, stop: int) -> bool:
@@ -265,7 +294,7 @@ class Timeline:
         ``writes_a`` and ``writes_b`` (voice-relative writes per frame) from the state at the
         start of ``lo``; the same later writes from a frame end at or after ``stop`` on equal
         states decide it."""
-        chips_ = [self.at(0, lo), self.at(1, lo)]
+        chips_ = [self.at(1, lo), self.at(2, lo)]
         for g, (wa, wb) in enumerate(zip(writes_a, writes_b), lo):
             end, ws = self.starts[g + 1], (absolute(wa, v), absolute(wb, v))
             if not same(*(c.envelope_trace(v, w, end) for c, w in zip(chips_, ws))):
@@ -361,8 +390,7 @@ def pattern_changes(init: np.ndarray, frames: list) -> tuple:
                     {},
                 )
                 native = events(start, mine)
-                for i, order in enumerate(ORDERS):
-                    keep = tuple(pick(last, order))
+                for i, keep in enumerate(all_keeps(last)):
                     if keep not in memo:
                         memo[keep] = events(start, list(keep))
                     if memo[keep] != native:
@@ -409,8 +437,7 @@ def _mask(
         [],
         {},
     )
-    for order in ORDERS:
-        keep = tuple(pick(last, order))
+    for keep in all_keeps(last):
         if keep not in seen:
             new = arrange(mine, list(keep))
             seen[keep] = (new - shift).tobytes()
@@ -482,12 +509,8 @@ def hard_restarts(  # pylint: disable=too-many-locals
                 )
                 neutral_values = None
                 if 0 <= begun and f - begun < 5:
-                    rows = [tl.rel(g, v) for g in range(begun, f + horizon)]
                     cut = since[v] if held else first
-                    trial = [neutral(r, cut) for r in rows]
-                    for r, t in zip(rows, trial):
-                        t[r[:, 0] >= first] = r[r[:, 0] >= first]
-                    neutral_values = tl.agree(v, rows, trial, begun, f)
+                    neutral_values = _neutral(tl, f, v, begun, cut, horizon)
                 found[(held >= settle, held // 19656, neutral_values)] += 1
             for cycle, reg, value in mine.tolist():
                 ctrl, sr = (
@@ -499,3 +522,26 @@ def hard_restarts(  # pylint: disable=too-many-locals
                 )
         regs[tl.frames[f][1][:, 1]] = tl.frames[f][1][:, 2]
     return found
+
+
+def _neutral(tl: Timeline, f: int, v: int, begun: int, cut: int, horizon: int) -> bool:
+    """Whether voice ``v``'s frame-``f`` note-on plays the same envelope with the AD and SR
+    written from cycle ``cut`` of frame ``begun`` on neutral (:func:`neutral`). The hard restart
+    leaves the gate off and the release nibble 0, so those writes reach the envelope only as the
+    attack, decay and sustain they latch; the note frame starts from the native state with the
+    neutral latches written first."""
+    late = np.concatenate(
+        [np.empty((0, 3), np.int64), *(tl.rel(g, v) for g in range(begun, f))]
+    )
+    late = late[late[:, 0] >= cut]
+    ad, sr = late[late[:, 1] == 5], late[late[:, 1] == 6]
+    patch = []
+    if (ad[:, 2] != 0).any():
+        patch.append((tl.starts[f], 5, 0))
+    if (sr[:, 2] & 0xF0).any():
+        patch.append((tl.starts[f], 6, int(sr[-1, 2]) & 0x0F))
+    if not patch:
+        return True
+    rows = [tl.rel(g, v) for g in range(f, f + horizon)]
+    trial = [np.concatenate([np.array(patch, np.int64), rows[0]]), *rows[1:]]
+    return tl.agree(v, rows, trial, f, f)
