@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import bus, c64, cia, cpu, eventsched, kernal, machine, media, memmap, roms
+from . import bus, c64, cia, cpu, eventsched, kernal, machine, media, memmap, reu, roms
 from . import vicii
 from .bus import Bus
 from .c64 import (
@@ -36,6 +36,7 @@ from .eventsched import Event, PHI1, PHI2, Scheduler
 from .kernal import KernalHost, KernalHostError, sys_addr
 from .machine import Machine, NativeSid, boot_cycle
 from .memmap import NTSC, PAL, Video
+from .reu import Reu
 from .roms import RomFetchError, kernal_stub
 from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
 
@@ -53,6 +54,8 @@ __all__ = [
     "kernal",
     "machine",
     "memmap",
+    "reu",
+    "Reu",
     "roms",
     "vicii",
     "media",

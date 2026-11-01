@@ -7,21 +7,26 @@ pub const MAX: i32 = 65536;
 pub const NMI: usize = 0;
 pub const VIDEO: usize = 1;
 pub const CIA: usize = 2;
+pub const REU: usize = 3;
+const IRQS: [usize; 3] = [VIDEO, CIA, REU];
 
-/// Event names, indexed as `Ev`.
-pub const NAMES: [&str; 8] = [
+/// Event names: the sources by index, `rti`, `brk_entry`, then each source's entry.
+pub const NAMES: [&str; 10] = [
     "nmi",
     "video_irq",
     "cia_irq",
+    "reu_irq",
     "rti",
     "brk_entry",
     "nmi_entry",
     "video_irq_entry",
     "cia_irq_entry",
+    "reu_irq_entry",
 ];
-pub const EV_RTI: u8 = 3;
-pub const EV_BRK_ENTRY: u8 = 4;
-pub const EV_ENTRY: u8 = 4;
+pub const EV_RTI: u8 = 4;
+pub const EV_BRK_ENTRY: u8 = 5;
+/// The entry event of source `k` is `EV_ENTRY + k`.
+pub const EV_ENTRY: u8 = 6;
 
 #[derive(Clone)]
 pub struct Lines {
@@ -31,7 +36,7 @@ pub struct Lines {
     pub iflag: bool,
     pub rdy: bool,
     pub cc: i32,
-    pub asserted: [bool; 3],
+    pub asserted: [bool; 4],
     pub irq_cause: usize,
     irq_count: i32,
     pub buf: Vec<(i64, u8)>,
@@ -46,7 +51,7 @@ impl Lines {
             iflag: false,
             rdy: true,
             cc: 6,
-            asserted: [false; 3],
+            asserted: [false; 4],
             irq_cause: CIA,
             irq_count: 0,
             buf: Vec::new(),
@@ -58,14 +63,14 @@ impl Lines {
     }
 
     fn mark(&mut self, sched: &Sched, kind: usize) {
-        if kind != NMI && !self.asserted[VIDEO] && !self.asserted[CIA] {
+        if kind != NMI && !IRQS.iter().any(|&k| self.asserted[k]) {
             self.irq_cause = kind;
         }
         self.asserted[kind] = true;
         self.emit(sched.time(PHI1), kind as u8);
     }
 
-    /// An IRQ source (`VIDEO` or `CIA`) changing state.
+    /// An IRQ source (`VIDEO`, `CIA` or `REU`) changing state.
     pub fn irq(&mut self, sched: &mut Sched, state: bool, kind: usize) {
         if state {
             self.mark(sched, kind);
@@ -76,8 +81,7 @@ impl Lines {
             self.irq_count += 1;
         } else {
             self.asserted[kind] = false;
-            let other = if kind == CIA { VIDEO } else { CIA };
-            if self.asserted[other] {
+            if let Some(&other) = IRQS.iter().find(|&&k| k != kind && self.asserted[k]) {
                 self.irq_cause = other;
             }
             self.irq_count -= 1;

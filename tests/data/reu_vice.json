@@ -1,0 +1,590 @@
+{
+ "corpus": {
+  "count": 48,
+  "display": [
+   false,
+   true
+  ],
+  "ops": 16,
+  "seed": 1764
+ },
+ "emulator": "x64sc",
+ "programs": {
+  "reu0000": {
+   "colour": "1439a7c5eda82683c9328485",
+   "key": "bb36f402825d6da709fd1f8f",
+   "ram": "aaeed5b930e52acaad02c27e",
+   "reu": "fdd6306194b54846ea294701"
+  },
+  "reu0001": {
+   "colour": "f1c23a1750bd0a221dcf624d",
+   "key": "57848bc820719ff49ae3bab2",
+   "ram": "88529e7ab9f99fefc991cef5",
+   "reu": "e84c54828a355cfdfe2aeb86"
+  },
+  "reu0002": {
+   "colour": "48185777305b6d40982eb632",
+   "key": "521fe2975de2cf5291b454b5",
+   "ram": "0d5febea93360c2a8b393065",
+   "reu": "70dab8afbb82c0fb01771b75"
+  },
+  "reu0003": {
+   "colour": "38818ecce5cf33b491f79608",
+   "key": "0efc145bcefbfe8987fe47ea",
+   "ram": "bd0a52cfbc249bb972d60c31",
+   "reu": "d7139aab305ac4c1f7580dc1"
+  },
+  "reu0004": {
+   "colour": "a3e50394d933f1119c571d18",
+   "key": "52af0741827c11cf428bd5a3",
+   "ram": "44b0b40cc5eb903de8782ba2",
+   "reu": "868c8b5f69c6843a2fd96929"
+  },
+  "reu0005": {
+   "colour": "de5e79b5d91786558a5a1e83",
+   "key": "a4e5da0071fe1cf63db7720a",
+   "ram": "4425d632684faa12773c3d3d",
+   "reu": "6c1f732f38f27fc049271857"
+  },
+  "reu0006": {
+   "colour": "ee3dfada100d24aa274570fc",
+   "key": "5e104ec0b4010ab55da8b7a6",
+   "ram": "e0b752bc20d0deaf4e984c19",
+   "reu": "5f24aa1dac8ee7a6e24695aa"
+  },
+  "reu0007": {
+   "colour": "06cb6353c4162891f317c88e",
+   "key": "cedf76b8add7c257af83f501",
+   "ram": "9e58bb561f7d395f431ec6d4",
+   "reu": "c78f922edb5d41a48e1b081b"
+  },
+  "reu0008": {
+   "colour": "7e35aaee1400f9fa06799742",
+   "key": "3d361e55b13d588b35334dce",
+   "ram": "1e9866f4ce82ea45da9d7f5c",
+   "reu": "d8ae709e979ffb231d2f5fe0"
+  },
+  "reu0009": {
+   "colour": "809fb58c665cb60acca131f3",
+   "key": "5a84e3d17330a9b5ce157179",
+   "ram": "d80477fb88966bcdbefdd123",
+   "reu": "50ecc30128f6344987b3778c"
+  },
+  "reu0010": {
+   "colour": "b13745ae62f2ee7b350d2e28",
+   "key": "104c7cfe811180e29a52f112",
+   "ram": "f2151b15a98aa2424d633219",
+   "reu": "d2048e6b2b6693092a545b97"
+  },
+  "reu0011": {
+   "colour": "ef81caf6953de649f3970916",
+   "key": "efeffa642f17d8a397b6928f",
+   "ram": "d2e9df74bbf784ae940f746d",
+   "reu": "c774203ed7e7d3b41117c350"
+  },
+  "reu0012": {
+   "colour": "fbe2b012a9a3c84b6df68bb9",
+   "key": "ece9f5ec81652740990039b7",
+   "ram": "00df3fa35d0e8090359759f3",
+   "reu": "53da6d192ae05571e1324402"
+  },
+  "reu0013": {
+   "colour": "f33949deef0f04ca34746e41",
+   "key": "192257c93b246b4eb416f2a1",
+   "ram": "2fbabf9a67348d080c835e22",
+   "reu": "88fcc92855fe37e511bf71a9"
+  },
+  "reu0014": {
+   "colour": "83ad8594ebfd82ea45188bc9",
+   "key": "3578b0d9229ef522d25fa0b3",
+   "ram": "fb3e29e9b0cfafe4b6e0d313",
+   "reu": "1ef37ccfaee81f5c11b70080"
+  },
+  "reu0015": {
+   "colour": "f5fd3af5c94859e29dd3847a",
+   "key": "a5e2d3c4dcc8d954d93f6e43",
+   "ram": "6329851b39c8686288a00b74",
+   "reu": "e71c4a1a07e423c8f2f8c919"
+  },
+  "reu0016": {
+   "colour": "a4d6ec0a664ad74b5f5108c0",
+   "key": "da3b0053a72dfc52b8b74bb0",
+   "ram": "3a972a2c792f589e7e56a06c",
+   "reu": "35e9b3a9f3137c090a0d24dd"
+  },
+  "reu0017": {
+   "colour": "8474553ac99ce367e1e21ed7",
+   "key": "3a93fbd5731e4d911748d8e9",
+   "ram": "2684f5204cc0cd9fed77301a",
+   "reu": "f3833f4034376be8c2c7dbb3"
+  },
+  "reu0018": {
+   "colour": "1fd3e2af8644bf32cc4c93c9",
+   "key": "3d005b79ab5a4b626171fd92",
+   "ram": "f20fe31c8ccc96c390db3fb8",
+   "reu": "f0de361ece7d3ceca6eccaec"
+  },
+  "reu0019": {
+   "colour": "620f21a77185c239d0f3cd8b",
+   "key": "545e4a33e59bb4c5d72c9a6a",
+   "ram": "30fe89bff2ff8049f67bdde1",
+   "reu": "e34c41377567439efabc714c"
+  },
+  "reu0020": {
+   "colour": "1adc9ecd0c32833c58ef40be",
+   "key": "5bd200e23dd2b86281eac137",
+   "ram": "f80c23611f01a4e2f860cc90",
+   "reu": "d6e22909b42eb31df05f6871"
+  },
+  "reu0021": {
+   "colour": "e1b05f09a1a375f4ec0ba12e",
+   "key": "4c770111961ef621a6d8301f",
+   "ram": "06cd3325a267df0d642ded37",
+   "reu": "553eb3b7b3f7b6f4d7117837"
+  },
+  "reu0022": {
+   "colour": "7cab363f2295828a74f844e2",
+   "key": "fe638ec515fddc6a89149cab",
+   "ram": "1841360144d1f029f3ba55a4",
+   "reu": "5000f0bfea347f950a096d7e"
+  },
+  "reu0023": {
+   "colour": "ec86f83b3a09b24469d58075",
+   "key": "ac69030db5823441696a3414",
+   "ram": "f86da18829e127932e582ef6",
+   "reu": "1400987a0302cd398a655a0d"
+  },
+  "reu0024": {
+   "colour": "526657527ca666f0a2a30511",
+   "key": "a9b77be1fce9ad900649ca8c",
+   "ram": "7193a678019e8d5e64008f14",
+   "reu": "0e870c06d5485e4ef840a4be"
+  },
+  "reu0025": {
+   "colour": "9d512af863c352d8f9630a0b",
+   "key": "87f0c7ee1e33658e34a0c200",
+   "ram": "e8b2d08092c90232a1dd1f7d",
+   "reu": "626f26d677878d47eaa70687"
+  },
+  "reu0026": {
+   "colour": "2b0ffee0eae0ae403703949c",
+   "key": "14d4c5f4943127d5a6c3579f",
+   "ram": "12e302a152b7ab794f454d2e",
+   "reu": "1b23d78b9ede5a60e760387d"
+  },
+  "reu0027": {
+   "colour": "7652017c34716ef0ab1b1151",
+   "key": "7268821d783b777a742d023e",
+   "ram": "18a299c34401436d18685e53",
+   "reu": "3f2888143b2fd71d975d3d32"
+  },
+  "reu0028": {
+   "colour": "fb993e4d6591d4e7704596d6",
+   "key": "7a9ae9f3105511e8db74cbf6",
+   "ram": "eb4200a9cf66dd3ad6834f48",
+   "reu": "9087ff93d90f0589bb2c3fab"
+  },
+  "reu0029": {
+   "colour": "b7271d3f1acde6467f94092e",
+   "key": "5eb78526f67d6b30f367ce81",
+   "ram": "90899136582df53f86318c22",
+   "reu": "f7d07e6bc5ec91d52d3a490a"
+  },
+  "reu0030": {
+   "colour": "bc32bebec42795683f189171",
+   "key": "801ac4b46f9754135c93d5e2",
+   "ram": "03a1d9699947d3db3e43bdc3",
+   "reu": "426b1484b4b3dec560c143d8"
+  },
+  "reu0031": {
+   "colour": "ee38db40b588b3db23730d9e",
+   "key": "9260c7a7d3350578ffac94e1",
+   "ram": "dc130e481c2bacc9bd7d890b",
+   "reu": "04acb1dfe348b4850018334a"
+  },
+  "reu0032": {
+   "colour": "29e3cba4030ae745db953bcd",
+   "key": "06c980489d07ddd8ff7b04f6",
+   "ram": "02e1a9fb426f3aa25061e5e5",
+   "reu": "8efd43aad0a0466a5cb8b20b"
+  },
+  "reu0033": {
+   "colour": "b623bdeb96d11cc41c766fea",
+   "key": "f2f723936a4688faf7902b87",
+   "ram": "b3b47ed649ee5f4c5acfc2dc",
+   "reu": "7bdb095cd9de706bc4043415"
+  },
+  "reu0034": {
+   "colour": "a2354118b1fd5343f74f2494",
+   "key": "f71c8ac4efe087d113ae79ee",
+   "ram": "9345a634ea64025720ae70fc",
+   "reu": "fcc567f5e13f39b7ca46c672"
+  },
+  "reu0035": {
+   "colour": "ee83add406996162108197cd",
+   "key": "9c6055e607d74bec384039e3",
+   "ram": "9f39ef632eb3bdbb549b1454",
+   "reu": "36155adfdea22e745ff0c524"
+  },
+  "reu0036": {
+   "colour": "5f74573121d803957700c134",
+   "key": "667a6a60adcb02ae5d10649c",
+   "ram": "d2bd4e7f5098c54e42acbf43",
+   "reu": "6b7efc90c02ada70ec1b6b9e"
+  },
+  "reu0037": {
+   "colour": "9d60749b7856a26ce4cfa55c",
+   "key": "bd6af764ae876b72da4ba473",
+   "ram": "49aa7554599e5ca4eca15ef2",
+   "reu": "472253d9f8e74e436f97f053"
+  },
+  "reu0038": {
+   "colour": "e9d1aeab58f329dcb1807e82",
+   "key": "af9bbd247aeb5e3bb2724380",
+   "ram": "b8685b3b1b7a52261c7f24e6",
+   "reu": "5fcd49d384bd704eaf4cd0f4"
+  },
+  "reu0039": {
+   "colour": "fbabce27dd46718abcc5cf58",
+   "key": "de54c290f2e31af192a696d1",
+   "ram": "5565ac4dd5821371a7f37ade",
+   "reu": "605bc5752eaef20253f740b6"
+  },
+  "reu0040": {
+   "colour": "6c2b12e7613661a517f2900e",
+   "key": "6518fa94643fc0fe0d37ea10",
+   "ram": "1705712dc128035691e65cbe",
+   "reu": "d57d444f4b3ed265c8da227b"
+  },
+  "reu0041": {
+   "colour": "e29cad8a0b421052f41c6d88",
+   "key": "33f8fe54b2b0db8abc8d9ee5",
+   "ram": "059443cf42decf68ba7e21ec",
+   "reu": "45b2589a24e618d592a97617"
+  },
+  "reu0042": {
+   "colour": "f5fa267ba60f4270490f5da7",
+   "key": "2ce221d9ec575b4ac476ed62",
+   "ram": "cacd2f4ed201d3242392f3e7",
+   "reu": "62daaea0e80c9cfe9f4e7a14"
+  },
+  "reu0043": {
+   "colour": "34a2aba2f485bc305cedb335",
+   "key": "81eb263d98cbe2dd6b061854",
+   "ram": "ec8535310d67c26260119a0c",
+   "reu": "0650fc2ab57658aa665a359d"
+  },
+  "reu0044": {
+   "colour": "4fd7555cec4f36deeeb64743",
+   "key": "39f8bba3ec9a1f9853442a25",
+   "ram": "4f949a24b27b45abcd3bcdcb",
+   "reu": "196a315bd508bad0d2917389"
+  },
+  "reu0045": {
+   "colour": "38c4ce266f9461818f74c37d",
+   "key": "b68edb7e1d88d1a37fa3c381",
+   "ram": "700f361d128543e554c851eb",
+   "reu": "95b11c532fd2cde3652ab7e9"
+  },
+  "reu0046": {
+   "colour": "76d9f427ef7aa15afee25683",
+   "key": "5ee42b39dcc236366b0437ac",
+   "ram": "88c21058a0d334a48b07e29a",
+   "reu": "42cd878cb515b6e2e3e269a9"
+  },
+  "reu0047": {
+   "colour": "b09e854304729d70f620b8a1",
+   "key": "c6b6173721a0e70d2c21f96c",
+   "ram": "e0af90236e44601b635b00a2",
+   "reu": "3a77b14d651eefc5dc88b558"
+  },
+  "reud0000": {
+   "colour": "38ad69ed5c2fba8ccdc7802b",
+   "key": "180bea5c5d36a5e103c9e535",
+   "ram": "770cd8e5dd0cc952081ab27c",
+   "reu": "c387674b41684064f1931324"
+  },
+  "reud0001": {
+   "colour": "0166ce8150e47e070b6e74f0",
+   "key": "5d2e64d40c97628bd35efec6",
+   "ram": "671e40179f39a98ebee4a923",
+   "reu": "024aa7c9d0f63e21bc5afeea"
+  },
+  "reud0002": {
+   "colour": "de728758ace03d11ba5ff61e",
+   "key": "3454bf4ffbe902437a9d397a",
+   "ram": "a2e56ccc7504e2c10d3ea58f",
+   "reu": "70566ddf4279f080c3169a30"
+  },
+  "reud0003": {
+   "colour": "9d6fb829a811ebb39bc124c6",
+   "key": "476f576110566dbc9bd12421",
+   "ram": "789807dfe0774ba96112f29d",
+   "reu": "273657e74b4a6d6402da57cc"
+  },
+  "reud0004": {
+   "colour": "590ed4416f825a01c8c80c94",
+   "key": "45de1cf3f2d6a5e8c7336e7b",
+   "ram": "3f1b57fc0325751d4bb4ff75",
+   "reu": "c8d1837e11c60cfc64786acb"
+  },
+  "reud0005": {
+   "colour": "ccb782060912839d598c41a8",
+   "key": "7d992a5cb6a10e303b4bff0b",
+   "ram": "07a1cad7e60eced2c8a35afd",
+   "reu": "cdad62c8c0ab02d4ba658f5e"
+  },
+  "reud0006": {
+   "colour": "cca74834fea4ecd4f730e6e6",
+   "key": "49287bca37c0b040251c4ffb",
+   "ram": "6591b2ca3a8f4e83fe911cc6",
+   "reu": "5202cdca210885bd1f337916"
+  },
+  "reud0007": {
+   "colour": "cc62f3e3061784d2e5d25d6f",
+   "key": "f0c67d2e856df5d65b087adb",
+   "ram": "62aef88c68f1b536d2b8ffb5",
+   "reu": "5c86cdc0bae2661f4eac24fb"
+  },
+  "reud0008": {
+   "colour": "e453c8b409ebc138f0985dbe",
+   "key": "bea174b9051e2ad63f043315",
+   "ram": "b9fba7425aa230edaf71b58d",
+   "reu": "1281c225866f47c54b993add"
+  },
+  "reud0009": {
+   "colour": "63d9b4fd12fe4a2b3c03eb50",
+   "key": "81af425c9347674ae66c2a6e",
+   "ram": "17fbe19d9b8acefd48f8e096",
+   "reu": "22f29bb66a7408af2b006704"
+  },
+  "reud0010": {
+   "colour": "24ff099eb40f2efbf2b5f389",
+   "key": "edae8760b3d6093157913ab6",
+   "ram": "5de04e94853be3c4517d8654",
+   "reu": "01a7224c318131907d57e5fe"
+  },
+  "reud0011": {
+   "colour": "1b85bb946f5438534c4efa54",
+   "key": "47049e2dc2ff7344b33852d7",
+   "ram": "183ff4085eeb29c97a409ab3",
+   "reu": "c66dacbb76c562a79ec46034"
+  },
+  "reud0012": {
+   "colour": "dc3dcd053d9d67b4cb99c523",
+   "key": "e68a169cc07cceb451081465",
+   "ram": "d84c6f3d3e4c8377da187090",
+   "reu": "2d27eb6a27c5233f4aee9768"
+  },
+  "reud0013": {
+   "colour": "079ab59f45a908589143bd44",
+   "key": "4eaef77219c8cae4f8619176",
+   "ram": "627e00ec162484a26067935b",
+   "reu": "7305125ad5dd991192a0e918"
+  },
+  "reud0014": {
+   "colour": "0ce1279c791508fcf5b59692",
+   "key": "d2d429c3b1937b8076be0414",
+   "ram": "906c0278dcf80377a3042d6c",
+   "reu": "bd572ca898ad55a8f8b211dd"
+  },
+  "reud0015": {
+   "colour": "111a43b70662ec82e767654a",
+   "key": "b2657255fe92cb96d0865c42",
+   "ram": "40600772564646a8fea8adb8",
+   "reu": "d74b8e64db2f24bcea4bdd78"
+  },
+  "reud0016": {
+   "colour": "be46aef9ca150a2de01826e5",
+   "key": "423d7cabb0ac5e71bcc86506",
+   "ram": "94ae5fbdc014f3d59f8552dd",
+   "reu": "03c2271510d7a2bd4ceb90fc"
+  },
+  "reud0017": {
+   "colour": "611478f8761f5554570c0ccb",
+   "key": "c771c9673442f3410224cb6b",
+   "ram": "a87859b1e39fc426626eaf62",
+   "reu": "57840bd6213704e2401d2a64"
+  },
+  "reud0018": {
+   "colour": "e139e1f38caaa9f0924b6ecc",
+   "key": "bb6e0ac2914a1e633ae74b1e",
+   "ram": "c3150ce7f7a25e815df98c71",
+   "reu": "d2d8719e95111b3a2260e058"
+  },
+  "reud0019": {
+   "colour": "898752a48a37c7bb13b25ea2",
+   "key": "99a4c73b8bc93c2b48c1379c",
+   "ram": "3130bfef8fa96efe75c978b9",
+   "reu": "ac4fc536b531001f5d1bc9aa"
+  },
+  "reud0020": {
+   "colour": "0623ad797c9d3818b73f237f",
+   "key": "fd9e0392750faa0adaaad875",
+   "ram": "f8bc31b1a278bc85008efb04",
+   "reu": "0c07ce81e6d0c36379bc2f58"
+  },
+  "reud0021": {
+   "colour": "5d3f2933d689a518822868a9",
+   "key": "51444a1948914478d7fee61a",
+   "ram": "59dca9f8c425e912c921ff03",
+   "reu": "fe4d5fa0fef341b17ae990ef"
+  },
+  "reud0022": {
+   "colour": "8070d6aed038176497921ca2",
+   "key": "40304cf1089c0d403755c3b7",
+   "ram": "0629dc90596a053f4ca01cd9",
+   "reu": "464d78bf4d0dd6db5b5c75fd"
+  },
+  "reud0023": {
+   "colour": "1bc54f8261d7c4febbb70efa",
+   "key": "92ab80892d50055399f6f272",
+   "ram": "cd0574a6eaf6ec2d2f9f694c",
+   "reu": "e84b3e052f7e75da27573d83"
+  },
+  "reud0024": {
+   "colour": "d4baa3952970ce24b90e4c3a",
+   "key": "45a9d89fac0608fed3b02bed",
+   "ram": "29b89c18c27c48d875a6f978",
+   "reu": "973abba0fa28430fe10e1729"
+  },
+  "reud0025": {
+   "colour": "b1ce51e3d8af1b9b7b876f47",
+   "key": "ecd2ef9a60df259d8770f482",
+   "ram": "3bc38572d84d162fd8933600",
+   "reu": "f9166e9c4092628ef05970ab"
+  },
+  "reud0026": {
+   "colour": "2aa410c84abb8162060beae5",
+   "key": "17b38f717e0544f892800ace",
+   "ram": "34a71ce4876b371bfde74bd4",
+   "reu": "583653c6fa768c6b922b5370"
+  },
+  "reud0027": {
+   "colour": "a47a33dea61c82d23bd553ab",
+   "key": "241294a0e3a82257e4402f38",
+   "ram": "16c825202ab5e0783ca04234",
+   "reu": "de6f8fb64597b3afa57957fa"
+  },
+  "reud0028": {
+   "colour": "260d345447c6e6b8d698b74b",
+   "key": "b15ac9f47826d684ad896a9a",
+   "ram": "c94c0e50653a5568a50bc919",
+   "reu": "9fd68c8ff054a754aa522745"
+  },
+  "reud0029": {
+   "colour": "3b2b2649f7648cd82676d83c",
+   "key": "1b80f5d564f328287e796e7d",
+   "ram": "274731911e0aeaa7f1cfdd25",
+   "reu": "bc9981c8393db93f9feaf13b"
+  },
+  "reud0030": {
+   "colour": "0f31f1e8557a8859884ce4c0",
+   "key": "0361613f153561de86bf799f",
+   "ram": "045806ac7503df516a47b6aa",
+   "reu": "6f1171969736ca800fa75851"
+  },
+  "reud0031": {
+   "colour": "656575fa1dd690264ec9924e",
+   "key": "22480b91873200381cd70f0b",
+   "ram": "1dba402b1f2a137d511d8c72",
+   "reu": "9d42127c74a1c34879cfd23d"
+  },
+  "reud0032": {
+   "colour": "c29b7cb33380544047cf4e85",
+   "key": "b5ac1e3a1a045884d1630f9b",
+   "ram": "ebd52d25c1790604a7ba9df4",
+   "reu": "eef4be7030c65757fed81fd6"
+  },
+  "reud0033": {
+   "colour": "95a8aafdace1cd0eeae827d1",
+   "key": "28c0f1d6e85e02c03138da2b",
+   "ram": "dabcdd4427032fe61615031a",
+   "reu": "9321aaa0fecacdc2f82ab166"
+  },
+  "reud0034": {
+   "colour": "278f361f2022a159117a5ef7",
+   "key": "1d46f88d3c26b7a9e1cf4eb2",
+   "ram": "ea3725e11ccc896c431e4601",
+   "reu": "c8c48719ede63dfaf90f1b74"
+  },
+  "reud0035": {
+   "colour": "38ae04543e86b6f11c90416a",
+   "key": "bed00b295526d526f68cdbbd",
+   "ram": "9bec16c21cec2afaf4df80de",
+   "reu": "65e67dd0f5364663cc2ce60c"
+  },
+  "reud0036": {
+   "colour": "a62ac3de23a592a6a15fa238",
+   "key": "223a000d8be20483be08c756",
+   "ram": "16be9fd920158b31be1cc43e",
+   "reu": "752ad2ac95bb583da1c7f981"
+  },
+  "reud0037": {
+   "colour": "481774b17a59d206791b5608",
+   "key": "f2a65489590eded2aea30f98",
+   "ram": "ea24267e2fa29174c7f4f519",
+   "reu": "11a27b7c8f691c0d09f415c6"
+  },
+  "reud0038": {
+   "colour": "f05b8b282ee29b6db4e2d9d8",
+   "key": "1f293c391632bc50905892d7",
+   "ram": "89d3b4b1ea16e2ddcc1b6bd3",
+   "reu": "2c6d0d80235db1e0c15aa949"
+  },
+  "reud0039": {
+   "colour": "c8c63c75e0ea40f500086ae4",
+   "key": "6290de1b8c2e80958d9dc4b7",
+   "ram": "f07a9aad64d741eda7e76fa2",
+   "reu": "b9e29988cbf775abb2421238"
+  },
+  "reud0040": {
+   "colour": "826bdceaddc8859aadf30fb3",
+   "key": "e5db421fcd0a24dd07c4720a",
+   "ram": "c9915199a2a3a804ec352bc3",
+   "reu": "efd836caf4f034b0b25a88c1"
+  },
+  "reud0041": {
+   "colour": "be87426426399e45c7f3fd3d",
+   "key": "ed1f7f9edd5a4b92055a6d1e",
+   "ram": "fa9b1e12961fb57d534450b3",
+   "reu": "00bd04766591d4c0c48074a3"
+  },
+  "reud0042": {
+   "colour": "a4578e5c1d0a421478a5e849",
+   "key": "d79d588414667c476c1af35c",
+   "ram": "20f00af31435b55d8378370c",
+   "reu": "814432db788eb269dcda321c"
+  },
+  "reud0043": {
+   "colour": "2efc7746262bc33473d43941",
+   "key": "e2094cebd290536407737e3e",
+   "ram": "16f2b36275ac835668192002",
+   "reu": "72cff446bea8ffcf2721577e"
+  },
+  "reud0044": {
+   "colour": "911f565b01138f7fc28a0493",
+   "key": "729f2bb9e5baa3758c645d5a",
+   "ram": "41b36924168f587a9c3d8f99",
+   "reu": "1a12b39d2855166436915768"
+  },
+  "reud0045": {
+   "colour": "aeb3eee2e5d0ce0100d97655",
+   "key": "734202ad78b409ed7f647fc8",
+   "ram": "ba92e9dd1afb4e965bd17d14",
+   "reu": "05c3b6cde9b6f7e9458ce3a2"
+  },
+  "reud0046": {
+   "colour": "d54ced2818389521570f6b34",
+   "key": "9cac615fd37b77e83e8e59f7",
+   "ram": "3b8f731a3a5dc22b7f7f5690",
+   "reu": "642947e86826fa09faa5d89d"
+  },
+  "reud0047": {
+   "colour": "7947cd4a9f31b23d6920387b",
+   "key": "73193428c572e0e3b995bddd",
+   "ram": "a0fc1989d68a16d9b4ea9980",
+   "reu": "03102501a879476b364e63d1"
+  }
+ }
+}

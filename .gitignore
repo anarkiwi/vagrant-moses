@@ -225,3 +225,4 @@ __marimo__/
 # Process core dumps
 core
 core.[0-9]*
+.reu-cache/
