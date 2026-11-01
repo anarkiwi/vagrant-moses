@@ -9,13 +9,14 @@ extraction of files from release media (zip/gzip, d64/d71/d81, t64, p00).
 
 Pure Python with no runtime dependencies (wheels also carry a native Rust `Machine`); the CPU-driven parts (`Machine`, `flat_mpu`,
 `KernalHost`) run on jennings via the `cpu` extra; the media CLI's progress bar
-needs the `cli` extra. The SID audio model and SID-file knowledge (PSID/RSID
-containers, subtune headers, drivers) are deliberately not here.
+needs the `cli` extra. The SID's audio model is not implemented here: `sidorder` judges
+envelopes through the optional pylibresidfp (the `sidorder` extra). SID-file knowledge
+(PSID/RSID containers, subtune headers, drivers) is deliberately not here.
 
 ## Install
 
 ```bash
-pip install -e ".[cpu]"
+pip install -e ".[cpu]"            # add ".[sidorder]" for vagrant_moses.sidorder
 ```
 
 ## Use
@@ -52,6 +53,7 @@ vagrant-moses media extract dl/ -o prg/                 # prints sha256 size $lo
 
 - [The machine model: memory map, bus, ROMs, chips, machine, KERNAL and IRQ dispatch](docs/c64.md)
 - [The native machine: Rust port, hooks, threading, verification](docs/native.md)
+- [SID write order and hard restart: event patterns, the order cover, the settled hard restart](docs/sidorder.md)
 - [Release media: nested containers, disk geometries, tapes, and the CLI](docs/media.md)
 
 ## Develop
