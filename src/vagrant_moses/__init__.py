@@ -10,7 +10,20 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from . import bus, c64, cia, cpu, eventsched, kernal, machine, media, memmap, reu, roms
+from . import (
+    bus,
+    c64,
+    cia,
+    cpu,
+    eventsched,
+    kernal,
+    machine,
+    media,
+    memmap,
+    reu,
+    roms,
+    smc,
+)
 from . import vicii
 from .bus import Bus
 from .c64 import (

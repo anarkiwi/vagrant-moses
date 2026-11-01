@@ -78,6 +78,46 @@ attribute access; independent machines run in parallel.
 - Any hook may set `machine.stop = True`; `run` returns after the cycle that decoded.
   An exception from a hook, device or sink ends the run and is raised from `run`.
 
+## SMC recorder
+
+`vagrant_moses.smc.Recorder(machine, image, banked=True)` arms the native machine (no
+pure-Python equivalent: `smc.AVAILABLE`) with a lift-time 64 KiB `image`. It lives in
+`crates/moses-core/src/smc.rs`; the machine feeds it at four points and nothing calls Python:
+
+- every CPU bus write, interrupt/BRK push (`Core::push`) and REU DMA write to RAM;
+- the entry kind at the interrupt sequence's vector choice (NMI, IRQ of any source, BRK);
+- every decode, before the trap and again after a trap that moved `pc`.
+
+At a decode the writes since the previous one are attributed, by address, to the previous
+instruction (its opcode, pc, call and context) or to the entry that pushed them, when the
+byte changed; a store of the value already held keeps the old writer. A change of the bank bits
+makes the previous instruction the port's writer. Interrupt contexts are a stack of
+`(context, frame sp)`, popped while `sp` is above the top frame: an IRQ or NMI entry opens its
+own context, a BRK inherits. The entry's hardware vector bytes, then the bytes the instruction
+fetches or reads as control are checked, read side-effect free under the live map (RAM under
+I/O, the port registers at `$00/$01`): opcode, operands, the `JMP (ind)` pointer with its
+page wrap, the `(zp),Y` and `(zp,X)` pointers, and the `RTS`/`RTI` return bytes; the bank bits
+too once they differ from those at `begin()`. A decode repeating the previous one (same `pc`,
+`x`, `sp` and bank bits, no write or entry since) is skipped.
+
+A checked byte becomes an `Event(writer, writer_op, role, timing, mapping, first)`:
+
+| Field | Values |
+|---|---|
+| `writer` | `cpu` (`writer_op` the storing opcode), `irq_push`, `nmi_push`, `brk_push`, `reu_dma`, `cpu_port` (`writer_op` the port store's opcode, `None` once the host set the port) |
+| `role` | `opcode`, `operand`, `ptr_indirect`, `kernal_vector` (a pointer read at `$0314-$0319` by ROM code), `ret_addr`, `hw_vector`, `bank_reg` |
+| `timing` | `async` (an interrupt push, or written in an IRQ/NMI context), `pre_lift` (before `begin()`), `earlier_call`, `same_insn` (by this instruction, in the main context), `same_call_earlier` |
+| `mapping` | `rom_vs_ram` (read through ROM differing from the image, or through I/O: the port's writer), `ram_under_rom` (written while ROM was mapped there), `ram_under_io` (in `$D000-$DFFF`), `flat` |
+
+A RAM byte read with no writer and differing from the image is counted as `unowned`; pushes
+whose entry never reached a decode are `unattributed`. `unclassified()` returns the count and
+the first 16. Events are deduplicated by a 19-bit key (writer, opcode, role, timing, mapping)
+in a bitset; `first` is the call index (`begin()`, `next_call()`) or, after
+`frame_clock(cycles)`, `(cycle - t0) // cycles` with `t0` the next decode's cycle.
+`host_write(addr, value)` writes as the host (a call frame's return address, the port), owned
+by no instruction. `deadline` stops the run at the first decode after that cycle and sets
+`timed_out`; `finish()` attributes the last instruction's writes; re-arming starts afresh.
+
 ## Known difference
 
 The Python machine runs jennings' Python engine, which re-reads an instruction's bytes

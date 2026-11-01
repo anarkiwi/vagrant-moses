@@ -9,6 +9,7 @@ use crate::cia::Cia;
 use crate::lines::{self, Lines, MAX};
 use crate::reu::Reu;
 use crate::sched::Sched;
+use crate::smc;
 use crate::sys::{BusRef, Host, SidDev, Sys, RAM};
 use crate::vic::Vic;
 
@@ -154,6 +155,7 @@ impl Core {
             reu: cfg.reu.and_then(Reu::new).map(Box::new),
             dma: false,
             rmw: false,
+            rec: None,
         };
         s.remap();
         let mut layouts = cfg.layouts;
@@ -228,6 +230,7 @@ impl Core {
             self.s.flush(h);
             h.decode(self);
         }
+        self.record();
         if self.trap_set {
             if !self.armed && self.arm_pc == Some(self.cpu.pc) {
                 self.armed = true;
@@ -238,6 +241,7 @@ impl Core {
                 if !h.trap(self) {
                     break;
                 }
+                self.record();
             }
         }
         let pc = self.cpu.pc;
@@ -291,8 +295,22 @@ impl Core {
         }
     }
 
+    /// The SMC recorder's look at the instruction about to be decoded.
+    #[inline(always)]
+    fn record(&mut self) {
+        if let Some(mut r) = self.s.rec.take() {
+            let c = &self.cpu;
+            self.stop |= r.decode(&self.s, c.pc, c.x, c.sp, self.t);
+            self.s.rec = Some(r);
+        }
+    }
+
     fn push(&mut self, value: u8) {
-        self.s.img[RAM][0x100 | self.cpu.sp as usize] = value;
+        let addr = 0x100 | self.cpu.sp as usize;
+        if let Some(r) = self.s.rec.as_deref_mut() {
+            r.note(addr as u16, self.s.img[RAM][addr], true);
+        }
+        self.s.img[RAM][addr] = value;
         self.cpu.sp = self.cpu.sp.wrapping_sub(1);
     }
 
@@ -378,6 +396,15 @@ impl Core {
                 } else {
                     lines::EV_BRK_ENTRY
                 };
+                if let Some(r) = self.s.rec.as_deref_mut() {
+                    r.entry = if nmi {
+                        smc::W_NMI
+                    } else if self.d1x1 {
+                        smc::W_IRQ
+                    } else {
+                        smc::W_BRK
+                    };
+                }
                 self.s.ln.emit(t + 1, name);
             }
             PUSHSR => {
