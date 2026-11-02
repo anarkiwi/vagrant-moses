@@ -300,7 +300,7 @@ impl Core {
     fn record(&mut self) {
         if let Some(mut r) = self.s.rec.take() {
             let c = &self.cpu;
-            self.stop |= r.decode(&self.s, c.pc, c.x, c.sp, self.t);
+            self.stop |= r.decode(&self.s, c.pc, c.a, c.x, c.y, c.sp, self.t);
             self.s.rec = Some(r);
         }
     }

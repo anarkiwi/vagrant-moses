@@ -16,6 +16,7 @@ use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
 use moses_core::reu::{geometry, REGS, SIZES};
+use moses_core::trace::{Facts, Scan, Tracer};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
@@ -216,6 +217,19 @@ fn octets(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         .collect()
 }
 
+/// A per-opcode table of 256 little-endian `u16`.
+fn table16(obj: &Bound<'_, PyAny>) -> PyResult<[u16; 256]> {
+    let raw = octets(obj)?;
+    if raw.len() != 512 {
+        return Err(PyValueError::new_err("an opcode table is 256 u16"));
+    }
+    let mut t = [0u16; 256];
+    for (d, c) in t.iter_mut().zip(raw.as_chunks::<2>().0) {
+        *d = u16::from_le_bytes(*c);
+    }
+    Ok(t)
+}
+
 fn image(data: &[u8]) -> PyResult<Box<[u8; 0x10000]>> {
     <Box<[u8; 0x10000]>>::try_from(data.to_vec().into_boxed_slice())
         .map_err(|_| PyValueError::new_err("a ROM or RAM image is 65536 bytes"))
@@ -311,6 +325,20 @@ impl Machine {
             .rec
             .as_deref_mut()
             .ok_or_else(|| PyRuntimeError::new_err("the SMC recorder is not armed"))
+    }
+
+    fn scan<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Scan> {
+        self.rec(core)?
+            .scan
+            .as_deref_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("the scan is not armed"))
+    }
+
+    fn tracer<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Tracer> {
+        self.rec(core)?
+            .tracer
+            .as_deref_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("the trace is not armed"))
     }
 
     /// The hook a port write dispatches to, once the write is made.
@@ -833,6 +861,101 @@ impl Machine {
             })
             .collect();
         Ok((r.unclassified, sample))
+    }
+
+    /// Arm the recorder's trace: per-opcode `table` (256 little-endian `u16`), calls returning
+    /// to `sentinel`, the SID window `lo..hi` with registers from `image`.
+    fn smc_trace(
+        &self,
+        table: &Bound<'_, PyAny>,
+        sentinel: u16,
+        lo: u16,
+        hi: u32,
+        image: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let t = table16(table)?;
+        let image = self::image(&octets(image)?)?;
+        self.rec(self.core()?)?.tracer = Some(Box::new(Tracer::new(t, sentinel, lo, hi, &image)));
+        Ok(())
+    }
+
+    /// Arm the recorder's interrupt-driven main-context scan: per-opcode `table` (256
+    /// little-endian `u16`), the `sentinel` not counted.
+    fn smc_scan(&self, table: &Bound<'_, PyAny>, sentinel: u16) -> PyResult<()> {
+        let t = table16(table)?;
+        self.rec(self.core()?)?.scan = Some(Box::new(Scan::new(t, sentinel)));
+        Ok(())
+    }
+
+    /// Start the scan at the next decode, frames of `frame_cycles`.
+    fn smc_scan_start(&self, frame_cycles: i64) -> PyResult<()> {
+        if frame_cycles <= 0 {
+            return Err(PyValueError::new_err("frame_cycles must be positive"));
+        }
+        self.scan(self.core()?)?.start(frame_cycles);
+        Ok(())
+    }
+
+    /// `(vector, insns, busy frame)`: `(port bits, $0314, $FFFE)` at the first decode or None,
+    /// the main context's instructions counted and the frame of the first busy one or None.
+    #[allow(clippy::type_complexity)]
+    fn smc_scan_result(&self) -> PyResult<(Option<(u8, u16, u16)>, u64, Option<i64>)> {
+        let sc = self.scan(self.core()?)?;
+        Ok((sc.vector, sc.insns, sc.busy))
+    }
+
+    /// Enter `phase` (0 none, 1 init, 2 call) with the call's entry stack pointer `sp0`.
+    fn smc_trace_phase(&self, phase: u8, sp0: u8) -> PyResult<()> {
+        let t = self.tracer(self.core()?)?;
+        (t.phase, t.sp0) = (phase, sp0);
+        Ok(())
+    }
+
+    /// Close the phase: `(log, idx, vals)`, the SID accesses `(addr, value, write)` in order
+    /// and the RAM changed since the previous record (`idx` little-endian `u16`).
+    #[allow(clippy::type_complexity)]
+    fn smc_trace_snap<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(
+        Vec<(u16, u8, bool)>,
+        Bound<'py, PyBytes>,
+        Bound<'py, PyBytes>,
+    )> {
+        let core = self.core()?;
+        let mut t = self.rec(core)?.tracer.take();
+        let r = t.as_deref_mut().map(|t| t.snap(&core.s));
+        self.rec(core)?.tracer = t;
+        let r = r.ok_or_else(|| PyRuntimeError::new_err("the trace is not armed"))?;
+        let idx: Vec<u8> = r.idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+        Ok((r.log, PyBytes::new(py, &idx), PyBytes::new(py, &r.vals)))
+    }
+
+    /// `(starts, edges, writes, page1, heights, banks)` of the calls, ascending.
+    #[allow(clippy::type_complexity)]
+    fn smc_trace_facts(
+        &self,
+    ) -> PyResult<(
+        Vec<u16>,
+        Vec<(u16, u16)>,
+        Vec<(u16, Vec<u8>)>,
+        Vec<(u16, u16, u16)>,
+        Vec<(u16, Vec<i16>)>,
+        Vec<(u16, Vec<u8>)>,
+    )> {
+        let Facts {
+            starts,
+            edges,
+            writes,
+            page1,
+            heights,
+            banks,
+        } = self.tracer(self.core()?)?.facts();
+        let edges = edges
+            .iter()
+            .map(|&e| ((e >> 16) as u16, e as u16))
+            .collect();
+        Ok((starts, edges, writes, page1, heights, banks))
     }
 }
 

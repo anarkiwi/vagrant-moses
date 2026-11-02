@@ -118,6 +118,42 @@ in a bitset; `first` is the call index (`begin()`, `next_call()`) or, after
 by no instruction. `deadline` stops the run at the first decode after that cycle and sets
 `timed_out`; `finish()` attributes the last instruction's writes; re-arming starts afresh.
 
+## Trace
+
+`vagrant_moses.smc.Tracer(recorder, table, sentinel, sid, image)` (`smc.TRACE`) adds to an
+armed recorder the lift facts of a call-driven run and one record per phase
+(`crates/moses-core/src/trace.rs`), fed at the recorder's decodes and at the SID window's bus
+accesses, with no Python call per instruction. The host marks phases with `phase(kind, sp0)`
+(`NONE`, `INIT`, `CALL` entered at `sp0`) from its trap.
+
+`table` is 256 little-endian `u16`, one per opcode: address form in bits 0-3 (1-9: `zp`, `zpx`,
+`zpy`, `abs`, `absx`, `absy`, `(zp,X)`, `(zp),Y`, `(ind)`), bit 4 a data read and bit 5 a store
+of the form's address, bits 6-8 the register a plain store stores (A, X, Y, A&X) and bits 9-10
+the bytes pushed below `sp`. Each `CALL` decode (not the `sentinel`, not after `deadline`)
+records the start, stack height `sp - sp0` and bank bits per pc and the edge from the previous
+decode, and resolves the instruction's page-1 data addresses (`(ind)` pointer bytes, read and
+store addresses in `$0100-$01FF`, as a range per pc) and store addresses from the bytes it
+fetches and RAM. The next decode (or `finish()`) values the stores: the RAM byte where the CPU
+does not see I/O (and at `$00/$01`), else, outside the SID window, the stored register.
+
+The SID window answers ahead of the machine's devices: the 32-byte devices at `lo..hi` step
+`$20`, the `$D400` one also for its `$D400-$D7FF` mirrors; a register reads the last value
+written there, else `image`'s byte. Every access in a phase is logged `(addr, value, write)`,
+and a write in `CALL` adds its value to the address's stored values. `snap()` closes a phase:
+its log and the RAM bytes changed since the previous snap (`idx` as little-endian `u16`, and
+their values). `facts()` returns `Facts(starts, edges, writes, page1, heights, banks)`,
+ascending (heights by their 16-bit two's-complement value). Starts, heights, banks, stored
+values and page-1 ranges are fixed-size tables; edges pass a two-entry successor cache per pc
+before a set.
+
+`vagrant_moses.smc.Scan(recorder, table, sentinel)` scans the main context of an
+interrupt-driven phase from the decode after `start(frame_cycles)`: that decode's bank bits and
+RAM `$0314` and `$FFFE` words, then each decode in the main context (the recorder's interrupt
+contexts closed, not the `sentinel`) is counted until the first whose form address or pointer
+bytes are I/O under the live bits, or which stores outside page 1 (`table` as the trace's: form
+in bits 0-3, bit 4 a read and bit 5 a store of it); `result()` returns `(vector, insns, busy
+frame)`.
+
 ## Known difference
 
 The Python machine runs jennings' Python engine, which re-reads an instruction's bytes

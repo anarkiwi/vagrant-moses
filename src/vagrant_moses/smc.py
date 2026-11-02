@@ -12,9 +12,19 @@ from typing import List, NamedTuple, Optional, Tuple
 
 from . import machine as _machine
 
-__all__ = ["AVAILABLE", "Event", "Recorder", "opcode_table"]
+__all__ = [
+    "AVAILABLE",
+    "TRACE",
+    "Event",
+    "Facts",
+    "Recorder",
+    "Scan",
+    "Tracer",
+    "opcode_table",
+]
 
 AVAILABLE = _machine.NATIVE and hasattr(_machine._core.Machine, "smc_arm")
+TRACE = AVAILABLE and hasattr(_machine._core.Machine, "smc_trace")
 _PTR = {"ind": 1, "indy": 2, "indx": 3}
 _RET = {"RTS": 1, "RTI": 2}
 
@@ -44,6 +54,19 @@ def opcode_table() -> bytes:
         mn, mode = OPCODES[op]
         out[op] = MODE_LEN[mode] | _PTR.get(mode, 0) << 2 | _RET.get(mn, 0) << 4
     return bytes(out)
+
+
+class Facts(NamedTuple):
+    """A trace's lift facts, ascending: instruction starts, ``(pc, next)`` edges, the values
+    stored per address, ``(pc, lo, hi)`` page-1 data ranges, and stack heights (``sp`` less the
+    call's entry ``sp``) and bank bits per start."""
+
+    starts: List[int]
+    edges: List[Tuple[int, int]]
+    writes: List[Tuple[int, List[int]]]
+    page1: List[Tuple[int, int, int]]
+    heights: List[Tuple[int, List[int]]]
+    banks: List[Tuple[int, List[int]]]
 
 
 class Recorder:
@@ -104,3 +127,62 @@ class Recorder:
 
     def disarm(self) -> None:
         self.m.smc_disarm()
+
+
+class Tracer:
+    """The armed ``recorder``'s trace: lift facts of the call phase's instructions and one
+    record per phase. ``table`` holds 256 little-endian ``u16`` per opcode (``docs/native.md``);
+    calls return to ``sentinel``; the SID window ``sid`` (``(lo, hi)``) is answered natively,
+    registers from ``image``."""
+
+    NONE, INIT, CALL = range(3)
+
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
+    def __init__(self, recorder, table, sentinel, sid, image):
+        if not TRACE:
+            raise ImportError("the trace needs vagrant_moses._core with smc_trace")
+        self.m = recorder.m
+        self.m.smc_trace(bytes(table), sentinel, sid[0], sid[1], bytes(image))
+
+    def phase(self, phase: int, sp0: int = 0) -> None:
+        """Enter ``phase`` (:attr:`NONE`, :attr:`INIT`, :attr:`CALL`), a call entered at ``sp0``."""
+        self.m.smc_trace_phase(phase, sp0)
+
+    def snap(self) -> Tuple[list, bytes, bytes]:
+        """Close the phase: ``(log, idx, vals)``, its ``(addr, value, write)`` SID accesses in
+        order and the RAM bytes changed since the previous snap (``idx`` little-endian
+        ``u16``)."""
+        return self.m.smc_trace_snap()
+
+    def facts(self) -> Facts:
+        starts, edges, writes, page1, heights, banks = self.m.smc_trace_facts()
+        return Facts(
+            starts,
+            edges,
+            [(a, list(v)) for a, v in writes],
+            page1,
+            heights,
+            [(p, list(v)) for p, v in banks],
+        )
+
+
+class Scan:
+    """The armed ``recorder``'s scan of an interrupt-driven phase's main context. ``table``
+    holds 256 little-endian ``u16`` per opcode: the address form (as :class:`Tracer`'s), bit 4
+    a read and bit 5 a CPU store of it; the ``sentinel`` is not counted."""
+
+    def __init__(self, recorder, table, sentinel):
+        if not TRACE:
+            raise ImportError("the scan needs vagrant_moses._core with smc_scan")
+        self.m = recorder.m
+        self.m.smc_scan(bytes(table), sentinel)
+
+    def start(self, frame_cycles: int) -> None:
+        """Start at the next decode, frames of ``frame_cycles`` cycles from it."""
+        self.m.smc_scan_start(frame_cycles)
+
+    def result(self) -> Tuple[Optional[Tuple[int, int, int]], int, Optional[int]]:
+        """``(vector, insns, busy)``: ``(port bits, RAM $0314 word, RAM $FFFE word)`` at the
+        first decode (None before it), the main context's instructions until the first that
+        stores outside page 1 or touches I/O, and that one's frame (None: none did)."""
+        return self.m.smc_scan_result()

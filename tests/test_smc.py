@@ -248,3 +248,100 @@ def test_machines_take_rom_images():
         m = Machine(backend=backend, roms={mm.KERNAL_BASE: kernal})
         m.reset(ORG)
         assert m[0xE000] == 0x60 and m[0xA000] == Machine(backend=backend)[0xA000]
+
+
+def _table(entries):
+    t = bytearray(512)
+    for op, e in entries.items():
+        t[2 * op : 2 * op + 2] = e.to_bytes(2, "little")
+    return bytes(t)
+
+
+def test_the_trace_collects_facts_and_records_per_call():
+    src = """
+    entry: LDX #$01
+    ld:    LDA $D418
+           STA $D400
+    st:    STA $0150,X
+           PHA
+    pl:    PLA
+    inc:   INC $80
+    js:    JSR sub
+           RTS
+    sub:   RTS
+    idle:  JMP idle
+    """
+    abs_w, a = 4 | 1 << 5, 1 << 6
+    table = _table(
+        {0xAD: 4 | 1 << 4, 0x8D: abs_w | a, 0x9D: 5 | 1 << 5 | a, 0x48: 1 << 9,
+         0xE6: 1 | 3 << 4, 0x20: 4 | 1 << 5 | 2 << 9}  # fmt: skip
+    )
+    m, rec, _, labels = _armed(src)
+    start = m.reset(labels["idle"])
+    image = bytearray(m.ram)
+    image[0xD418] = 0x42
+    tr = smc.Tracer(rec, table, labels["idle"], (mm.SID_BASE, mm.SID_LAST + 1), image)
+    records, calls = [], []
+
+    def trap(mc):
+        if calls:
+            records.append(tr.snap())
+        tr.phase(tr.NONE)
+        calls.append(mc.cycle)
+        if len(records) == 2:
+            mc.stop = True
+            return False
+        sp, ret = mc.mpu.sp, labels["idle"] - 1
+        rec.host_write(0x100 | sp, ret >> 8)
+        rec.host_write(0x100 | (sp - 1) & 0xFF, ret & 0xFF)
+        mc.mpu.sp, mc.mpu.pc = (sp - 2) & 0xFF, labels["entry"]
+        tr.phase(tr.CALL, mc.mpu.sp)
+        return True
+
+    m.set_trap(trap, {labels["idle"]})
+    m.run(start + 100_000)
+    rec.finish()
+    assert len(records) == 2
+    assert records[0][0] == [(0xD418, 0x42, False), (0xD400, 0x42, True)]
+    idx = memoryview(records[1][1]).cast("H").tolist()
+    assert idx == [0x80] and list(records[1][2]) == [m.ram[0x80]] == [2]
+    f = tr.facts()
+    assert f.starts[0] == labels["entry"] and labels["idle"] not in f.starts
+    writes = dict(f.writes)
+    assert (
+        writes[0xD400] == [0x42] and writes[0x0151] == [0x42] and writes[0x80] == [1, 2]
+    )
+    assert dict(f.heights)[labels["pl"]] == [-1] and dict(f.heights)[labels["sub"]] == [
+        -2
+    ]
+    assert f.page1 == [(labels["st"], 0x151, 0x151)]
+    assert (labels["js"], labels["sub"]) in f.edges and dict(f.banks)[labels["ld"]] == [
+        7
+    ]
+    with pytest.raises(RuntimeError):
+        Machine(backend="native").smc_trace_facts()
+
+
+@pytest.mark.parametrize(
+    "src,insns",
+    [
+        ("l: INC $0150\n BNE l\n LDA ($FB),Y\n", 513),
+        ("LDA #$01\n STA $0170\n JMP ($D010)\n", 3),
+        ("INC $0150\n STA $C000\n", 2),
+    ],
+)
+def test_the_scan_counts_the_main_context_until_it_is_busy(src, insns):
+    m, rec, start, _ = _armed(src + "idle: JMP idle\n")
+    m.ram[0xFB], m.ram[0xFC] = 0x00, 0xD0
+    table = _table({0xEE: 4 | 1 << 5, 0xB1: 8 | 1 << 4, 0x8D: 4 | 1 << 5, 0x6C: 9})
+    sc = smc.Scan(rec, table, 0xCFF0)
+    assert sc.result() == (None, 0, None)
+    cpf = mm.video(False).cycles_per_frame
+    want = (7, m.ram[0x314] | m.ram[0x315] << 8, m.ram[0xFFFE] | m.ram[0xFFFF] << 8)
+    sc.start(cpf)
+    m.run(start + 3 * cpf)
+    vector, n, busy = sc.result()
+    assert vector == want
+    assert (n, busy) == (insns, 0)
+    with pytest.raises(ValueError):
+        sc.start(0)
