@@ -342,22 +342,16 @@ class Frames:
         if not FRAMES:
             raise ImportError("the frames need vagrant_moses._core with smc_frames")
         self.m = recorder.m
-        self._tail = self._state = None
         self.m.smc_frames(sentinel, None if budget is None else tuple(budget))
 
     def take(self) -> Chunk:
         """The frames closed since the last take, emptied: the next frame's changes are against
         the RAM the last one left."""
-        if self._state is not None:
-            out, self._tail = self._tail or Chunk(Records(*[b""] * 7), b"", b""), None
-            return out
         *rec, entries, events = self.m.smc_frames_take()
         return Chunk(Records(*rec), entries, events)
 
     def _get(self):
-        if self._state is None:
-            return self.m.smc_frames_state()
-        return self._state
+        return self.m.smc_frames_state()
 
     @property
     def image(self) -> Optional[bytes]:
@@ -395,9 +389,7 @@ class Frames:
         return self.m.smc_frames_entries()
 
     def close(self) -> None:
-        """Stop recording once the run is over; the next :meth:`take` returns the last frames.
+        """Stop recording once the run is over; :meth:`take` still returns the closed frames.
         A frame still open is closed as halted (``jam``, else ``cycles``) when the CPU jammed
         or a limit stopped the run, else dropped, as a run's end cuts it."""
-        self._state = self.m.smc_frames_state()
-        *rec, entries, events = self.m.smc_frames_close()
-        self._tail = Chunk(Records(*rec), entries, events)
+        self.m.smc_frames_close()

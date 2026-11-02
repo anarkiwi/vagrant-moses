@@ -266,6 +266,8 @@ pub struct Frames {
     /// The kinds taken outside any frame (bit `k`), BRK included.
     pub foreign: u8,
     pub closed: u64,
+    /// Whether interrupts are still recorded.
+    pub live: bool,
     /// `(pc, sp)` of each handler entry, the 3-byte interrupt frame pushed.
     pub entry_sp: BTreeSet<(u16, u8)>,
     /// `(pc, port dir, port data)` of each handler entry.
@@ -283,6 +285,7 @@ impl Frames {
             dirty: false,
             foreign: 0,
             closed: 0,
+            live: true,
             entry_sp: BTreeSet::new(),
             entry_port: BTreeSet::new(),
         }
@@ -300,7 +303,7 @@ impl Frames {
 
     /// The sentinel's trap: the innermost handler's RTI resumes the interrupted code.
     pub fn trap(&mut self, core: &mut Core) -> bool {
-        if !self.ix.nested() || core.cpu.pc != self.ix.sentinel {
+        if !self.live || !self.ix.nested() || core.cpu.pc != self.ix.sentinel {
             return false;
         }
         let resume = self.pop(core, None);
@@ -318,6 +321,9 @@ impl Frames {
 
     /// An interrupt of `kind` was entered, the CPU at its handler.
     pub fn enter(&mut self, core: &mut Core, kind: u8) {
+        if !self.live {
+            return;
+        }
         if kind == K_BRK {
             if !self.ix.open() {
                 self.foreign |= 1 << K_BRK;

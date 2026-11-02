@@ -213,8 +213,7 @@ RAM changes are one net delta per record; the log holds the device accesses in m
 nested handlers' included.
 
 `take()` returns `Chunk(records, entries, events)` for the closed frames and empties them
-(the next chunk's changes are against its own `origin`); `close()` stops recording and the next
-`take()` returns the rest. `open` says a frame is open, `closed` counts the frames closed,
+(the next chunk's changes are against its own `origin`); `close()` stops recording (the closed frames stay to be taken). `open` says a frame is open, `closed` counts the frames closed,
 `image` is the RAM at the first entry, `dirty` and `foreign` as above, `entries()` the handler
 entries `(pc, sp)` and `(pc, port dir, port data)`. A frame still open at `close()` is closed as
 halted (`jam`, else `cycles`) when the CPU jammed or a limit stopped the run, else dropped.

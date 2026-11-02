@@ -1167,24 +1167,22 @@ impl Machine {
     }
 
     /// Stop recording frames: a frame still open is closed as halted when the run jammed or a
-    /// limit stopped it, else dropped. Returns the tail `(records..., entries, events)`.
-    fn smc_frames_close<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+    /// limit stopped it, else dropped. The closed frames stay to be taken.
+    fn smc_frames_close(&self) -> PyResult<()> {
         let core = self.core()?;
         let mut f = self.rec(core)?.frames.take();
-        let out = match f.as_deref_mut() {
-            Some(f) => {
-                let halted = core.jammed || self.rec(core)?.cause != STOP_NONE;
-                if halted {
-                    f.cut(core);
-                } else {
-                    f.discard(core);
-                }
-                Some(chunk_bytes(py, f))
-            }
-            None => None,
+        let Some(fr) = f.as_deref_mut() else {
+            return Err(PyRuntimeError::new_err("the frame recorder is not armed"));
         };
+        if core.jammed || self.rec(core)?.cause != STOP_NONE {
+            fr.cut(core);
+        } else {
+            fr.discard(core);
+        }
+        fr.live = false;
+        self.rec(core)?.frames = f;
         (core.watch, core.trap_set) = (Watch::Set(AddrSet::default()), false);
-        out.ok_or_else(|| PyRuntimeError::new_err("the frame recorder is not armed"))
+        Ok(())
     }
 
     /// The closed frames' `(origin, meta, log, log_end, idx, vals, delta_end, entries,
