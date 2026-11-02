@@ -141,6 +141,11 @@ impl Sys {
         }
     }
 
+    /// The recorder's trace, which answers the SID window ahead of the devices.
+    fn tracer(&mut self) -> Option<&mut crate::trace::Tracer> {
+        self.rec.as_deref_mut()?.tracer.as_deref_mut()
+    }
+
     fn sid(sids: &[(u32, SidDev)], addr: u16) -> Option<&SidDev> {
         let find = |base: u32| sids.iter().find(|s| s.0 == base).map(|s| &s.1);
         find((addr & 0xFFE0) as u32).or_else(|| {
@@ -190,16 +195,18 @@ impl Sys {
             self.vic.read(addr, &mut self.sched, &mut self.ln)
         } else if !(0xD8..0xDE).contains(&page) {
             let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
-            match Self::sid(&self.sids, addr) {
-                None => {
+            let traced = self.tracer().and_then(|t| t.sid_read(addr));
+            match (traced, Self::sid(&self.sids, addr)) {
+                (Some(v), _) => v,
+                (None, None) => {
                     self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
                     self.seed as u8
                 }
-                Some(&SidDev::Host(dev)) => {
+                (None, Some(&SidDev::Host(dev))) => {
                     self.flush(h);
                     h.sid_read(dev, cycle, reg)
                 }
-                Some(SidDev::Logged(state, dev)) => {
+                (None, Some(SidDev::Logged(state, dev))) => {
                     // SAFETY: serialised by the machine's run claim; no reference outlives the call.
                     let peeked = unsafe { state.state() }.peek(cycle, reg);
                     match peeked {
@@ -236,14 +243,17 @@ impl Sys {
             self.vic.write(addr, value, &mut self.sched, &mut self.ln);
         } else if !(0xD8..0xDE).contains(&page) {
             let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
-            match Self::sid(&self.sids, addr) {
-                None => {}
-                Some(&SidDev::Host(dev)) => {
+            let traced = self.tracer().is_some_and(|t| t.sid_write(addr, value));
+            match (traced, Self::sid(&self.sids, addr)) {
+                (true, _) | (false, None) => {}
+                (false, Some(&SidDev::Host(dev))) => {
                     self.flush(h);
                     h.sid_write(dev, cycle, reg, value);
                 }
                 // SAFETY: serialised by the machine's run claim; no reference outlives the call.
-                Some(SidDev::Logged(state, _)) => unsafe { state.state() }.write(cycle, reg, value),
+                (false, Some(SidDev::Logged(state, _))) => {
+                    unsafe { state.state() }.write(cycle, reg, value)
+                }
             }
         } else if page < 0xDC {
             self.colour[(addr & 0x3FF) as usize] = value & 0x0F;

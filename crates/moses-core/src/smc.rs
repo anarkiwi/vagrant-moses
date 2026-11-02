@@ -8,6 +8,7 @@
 //! `RTS`/`RTI` return bytes) under the live bank view.
 
 use crate::sys::{banking, port_read, Sys, IO, RAM};
+use crate::trace::{Scan, Tracer};
 
 /// Writer kinds; [`W_HOST`] marks a byte the host wrote and is never reported.
 pub const W_NONE: u8 = 0;
@@ -80,7 +81,7 @@ pub const RET_RTI: u8 = 2;
 
 const V_RAM: u8 = 0;
 const V_ROM: u8 = 1;
-const V_IO: u8 = 2;
+pub(crate) const V_IO: u8 = 2;
 const KVEC: std::ops::Range<u16> = 0x0314..0x031A;
 const IO_WINDOW: std::ops::RangeInclusive<u16> = 0xD000..=0xDFFF;
 const NMI_VECTOR: u16 = 0xFFFA;
@@ -144,7 +145,7 @@ impl Event {
 }
 
 /// What the CPU sees at `addr` under port bits `bits`: RAM, ROM or I/O (`$00`/`$01` are I/O).
-fn view(bits: i32, addr: u16) -> u8 {
+pub(crate) fn view(bits: i32, addr: u16) -> u8 {
     if addr < 2 {
         return V_IO;
     }
@@ -164,7 +165,7 @@ fn view(bits: i32, addr: u16) -> u8 {
 }
 
 /// A byte as the CPU sees it now, without a device read: RAM stands in under I/O.
-fn peek(s: &Sys, addr: u16) -> (u8, u8) {
+pub(crate) fn peek(s: &Sys, addr: u16) -> (u8, u8) {
     if addr < 2 {
         let v = if addr == 0 {
             s.port_dir
@@ -211,6 +212,10 @@ pub struct Recorder {
     /// A decode after this cycle stops the run and sets `timed_out`.
     pub deadline: i64,
     pub timed_out: bool,
+    /// The lift-fact and record trace, when armed.
+    pub tracer: Option<Box<Tracer>>,
+    /// The interrupt-driven main-context scan, when armed.
+    pub scan: Option<Box<Scan>>,
 }
 
 impl Recorder {
@@ -243,6 +248,8 @@ impl Recorder {
             sample: Vec::new(),
             deadline: i64::MAX,
             timed_out: false,
+            tracer: None,
+            scan: None,
         }
     }
 
@@ -413,8 +420,10 @@ impl Recorder {
         }
     }
 
-    /// The decode of the instruction at the CPU's `pc` at cycle `t`; true stops the run.
-    pub fn decode(&mut self, s: &Sys, pc: u16, x: u8, sp: u8, t: i64) -> bool {
+    /// The decode of the instruction at the CPU's `pc` (registers `a`, `x`, `y`, `sp`) at
+    /// cycle `t`; true stops the run.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode(&mut self, s: &Sys, pc: u16, a: u8, x: u8, y: u8, sp: u8, t: i64) -> bool {
         if self.frame_cycles > 0 {
             if self.t0 < 0 {
                 self.t0 = t;
@@ -423,9 +432,13 @@ impl Recorder {
         }
         let stop = t > self.deadline;
         self.timed_out |= stop;
+        if let Some(tr) = self.tracer.as_deref_mut() {
+            tr.decode(s, pc, a, x, y, sp, self.timed_out);
+        }
         if let Some(p) = self.prev {
             let idle = p.pc == pc && p.x == x && p.sp == sp && p.bits == s.bits;
             if idle && self.nwin == 0 && self.entry == W_NONE && !self.dirty {
+                self.scan(s, pc, x, y, t);
                 return stop;
             }
             self.attribute(s, p);
@@ -515,6 +528,7 @@ impl Recorder {
         if self.call >= 0 && s.bits != self.lift_bits {
             self.emit(self.port, R_BANK, pc, M_FLAT);
         }
+        self.scan(s, pc, x, y, t);
         self.prev = Some(Prev {
             pc,
             op,
@@ -525,12 +539,22 @@ impl Recorder {
         stop
     }
 
+    fn scan(&mut self, s: &Sys, pc: u16, x: u8, y: u8, t: i64) {
+        let main = self.ctx == C_MAIN;
+        if let Some(sc) = self.scan.as_deref_mut() {
+            sc.decode(s, pc, x, y, main, t);
+        }
+    }
+
     /// Attribute the last instruction's writes once the run is over; pushes of an entry
     /// whose handler was never decoded stay unattributed.
     pub fn finish(&mut self, s: &Sys) {
         self.entry = W_NONE;
         if let Some(p) = self.prev {
             self.attribute(s, p);
+        }
+        if let Some(tr) = self.tracer.as_deref_mut() {
+            tr.finish(s);
         }
     }
 }
