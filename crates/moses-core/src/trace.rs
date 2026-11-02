@@ -336,6 +336,28 @@ impl Tracer {
         }
     }
 
+    /// The I/O accesses logged in the open phase.
+    pub fn logged(&self) -> usize {
+        self.log.len()
+    }
+
+    /// The next instruction follows none: an interrupt context changes.
+    pub fn cut(&mut self) {
+        self.last = None;
+    }
+
+    /// Whether `ram` differs from the RAM the next record is against outside page `skip`.
+    pub fn differs_outside(&self, ram: &[u8; 0x10000], skip: usize) -> bool {
+        let (lo, hi) = (skip << 8, (skip + 1) << 8);
+        ram[..lo] != self.base[..lo] || ram[hi..] != self.base[hi..]
+    }
+
+    /// Forget the open phase's I/O accesses.
+    pub fn forget(&mut self) {
+        self.log.clear();
+        self.last = None;
+    }
+
     /// The RAM the next record's changes are against.
     pub fn base(&self) -> &[u8; 0x10000] {
         &self.base

@@ -3,6 +3,7 @@
 
 pub mod calls;
 pub mod cia;
+pub mod frames;
 pub mod lines;
 pub mod machine;
 pub mod reu;
@@ -14,6 +15,7 @@ pub mod trace;
 pub mod vic;
 
 pub use calls::Calls;
+pub use frames::Frames;
 pub use machine::{Config, Core, Layout, Watch};
 pub use sid::{SidShared, SidState};
 pub use smc::Recorder;

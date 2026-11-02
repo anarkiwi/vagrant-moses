@@ -6,6 +6,7 @@ use std::collections::VecDeque;
 use jennings_core::{AddrSet, Cpu};
 
 use crate::cia::Cia;
+use crate::frames::{K_BRK, K_NONE};
 use crate::lines::{self, Lines, MAX};
 use crate::reu::Reu;
 use crate::sched::{Sched, PHI2};
@@ -113,6 +114,7 @@ pub struct Core {
     vec_addr: u16,
     target: u16,
     d1x1: bool,
+    ikind: u8,
     pub t: i64,
     pub jammed: bool,
     pub stop: bool,
@@ -186,6 +188,7 @@ impl Core {
             vec_addr: 0,
             target: 0,
             d1x1: false,
+            ikind: K_NONE,
             t: 0,
             jammed: false,
             stop: false,
@@ -214,6 +217,7 @@ impl Core {
         self.layout = BRK_LAYOUT;
         self.idx = 6;
         self.base = 0;
+        self.ikind = K_NONE;
         self.s.ln.cc = 6;
     }
 
@@ -247,16 +251,24 @@ impl Core {
             }
             while self.watch.contains(self.cpu.pc) {
                 self.s.flush(h);
-                let calls = self.s.rec.as_deref_mut().and_then(|r| r.calls.take());
-                let go = match calls {
-                    Some(mut c) => {
-                        let go = c.trap(self);
-                        if let Some(r) = self.s.rec.as_deref_mut() {
-                            r.calls = Some(c);
-                        }
-                        go
+                let (calls, frames) = match self.s.rec.as_deref_mut() {
+                    Some(r) => (r.calls.take(), r.frames.take()),
+                    None => (None, None),
+                };
+                let go = if let Some(mut c) = calls {
+                    let go = c.trap(self);
+                    if let Some(r) = self.s.rec.as_deref_mut() {
+                        r.calls = Some(c);
                     }
-                    None => h.trap(self),
+                    go
+                } else if let Some(mut f) = frames {
+                    let go = f.trap(self);
+                    if let Some(r) = self.s.rec.as_deref_mut() {
+                        r.frames = Some(f);
+                    }
+                    go
+                } else {
+                    h.trap(self)
                 };
                 if !go {
                     break;
@@ -265,6 +277,11 @@ impl Core {
             }
         }
         let pc = self.cpu.pc;
+        if let Some(r) = self.s.rec.as_deref_mut() {
+            if !self.stop {
+                r.retire(pc);
+            }
+        }
         let op = self.s.look(h, pc) as usize;
         let l = &self.layouts[op];
         let (mode, branch) = (l.mode, l.branch);
@@ -321,6 +338,35 @@ impl Core {
             self.s.ln.ic = MAX;
         } else {
             self.decode(h);
+        }
+    }
+
+    /// The interrupt just entered reaches the armed call queue or frame recorder, after the
+    /// recorder has attributed the entry's pushes.
+    fn entered(&mut self) {
+        let kind = std::mem::replace(&mut self.ikind, K_NONE);
+        let Some(r) = self.s.rec.as_deref_mut() else {
+            return;
+        };
+        let (calls, frames) = (r.calls.take(), r.frames.take());
+        if kind == K_NONE || (calls.is_none() && frames.is_none()) {
+            if let Some(r) = self.s.rec.as_deref_mut() {
+                (r.calls, r.frames) = (calls, frames);
+            }
+            return;
+        }
+        self.record();
+        if let Some(mut c) = calls {
+            c.enter(self, kind);
+            if let Some(r) = self.s.rec.as_deref_mut() {
+                r.calls = Some(c);
+            }
+        }
+        if let Some(mut f) = frames {
+            f.enter(self, kind);
+            if let Some(r) = self.s.rec.as_deref_mut() {
+                r.frames = Some(f);
+            }
         }
     }
 
@@ -450,6 +496,13 @@ impl Core {
                     };
                 }
                 self.s.ln.emit(t + 1, name);
+                self.ikind = if nmi {
+                    lines::NMI as u8
+                } else if self.d1x1 {
+                    self.s.ln.irq_cause as u8
+                } else {
+                    K_BRK
+                };
             }
             PUSHSR => {
                 let p = self.cpu.p() & !0x30 | if self.d1x1 { 0x20 } else { 0x30 };
@@ -466,6 +519,7 @@ impl Core {
             }
             FN => {
                 self.cpu.pc = self.target;
+                self.entered();
                 self.decode(h);
             }
             HALT => self.jammed = true,

@@ -16,8 +16,16 @@ __all__ = [
     "AVAILABLE",
     "TRACE",
     "CALLS",
+    "FRAMES",
+    "Budget",
     "Calls",
+    "Chunk",
+    "ENTRY_FIELDS",
+    "EVENT_FIELDS",
+    "Frames",
     "Records",
+    "SOURCES",
+    "STOPS",
     "Event",
     "Facts",
     "Recorder",
@@ -29,6 +37,21 @@ __all__ = [
 AVAILABLE = _machine.NATIVE and hasattr(_machine._core.Machine, "smc_arm")
 TRACE = AVAILABLE and hasattr(_machine._core.Machine, "smc_trace")
 CALLS = AVAILABLE and hasattr(_machine._core.Machine, "smc_calls")
+FRAMES = AVAILABLE and hasattr(_machine._core.Machine, "smc_frames")
+#: The interrupt sources (an event's or entry's ``kind`` indexes it) and the reasons a run
+#: stops (:attr:`Calls.outcome` and :attr:`Frames.outcome` index it).
+SOURCES = getattr(_machine._core, "SOURCES", ()) if AVAILABLE else ()
+STOPS = getattr(_machine._core, "STOPS", ()) if AVAILABLE else ()
+#: ``(name, little-endian numpy type)`` of the fields of an event (21 bytes) and of a frame's
+#: entry (18 bytes), as ``numpy.dtype`` takes them.
+EVENT_FIELDS = [("record", "<u4"), ("icount", "<u4"), ("pos", "<u4"), ("at", "<u2")] + [
+    (r, "u1") for r in ("a", "x", "y", "sp", "p", "depth", "kind")
+]
+ENTRY_FIELDS = (
+    [("at", "<u2"), ("pc", "<u2")]
+    + [(r, "u1") for r in ("a", "x", "y", "sp", "p", "kind")]
+    + [("insns", "<u4"), ("cycles", "<u4")]
+)
 _PTR = {"ind": 1, "indy": 2, "indx": 3}
 _RET = {"RTS": 1, "RTI": 2}
 
@@ -192,12 +215,26 @@ class Scan:
         return self.m.smc_scan_result()
 
 
+class Budget(NamedTuple):
+    """The cycles and instructions a unit (a call or a frame) and a song (all its units) may
+    run, 0 for no limit. A run that hits one stops, and :attr:`Calls.outcome` or
+    :attr:`Frames.outcome` says which (:data:`STOPS`); the open unit then closes as halted
+    (``cycles``)."""
+
+    unit_cycles: int = 0
+    unit_insns: int = 0
+    song_cycles: int = 0
+    song_insns: int = 0
+
+
 class Records(NamedTuple):
     """A :class:`Calls` run's records, one per closed phase, as little-endian bytes: ``meta``
     7 per record (``phase, halt, a, x, y, sp, p``; halt 0 return, 1 cycles, 2 jam), ``log`` 4
     per logged I/O access (``addr`` u16, ``value``, ``write``) ending at the u64 ``log_end``,
     and the RAM changed since the previous record (the first: since ``origin``) as u16
-    ``idx`` and ``vals`` ending at the u64 ``delta_end``."""
+    ``idx`` and ``vals`` ending at the u64 ``delta_end``. ``events`` holds the interrupts
+    taken inside the records, :data:`EVENT_FIELDS` per event, ``record`` the index of the
+    record in these."""
 
     origin: bytes
     meta: bytes
@@ -206,6 +243,16 @@ class Records(NamedTuple):
     idx: bytes
     vals: bytes
     delta_end: bytes
+    events: bytes = b""
+
+
+class Chunk(NamedTuple):
+    """The frames :meth:`Frames.take` returns: their ``records``, the ``entries`` (one
+    :data:`ENTRY_FIELDS` row per record) and the ``events`` (:data:`EVENT_FIELDS`)."""
+
+    records: Records
+    entries: bytes
+    events: bytes
 
 
 class Calls:
@@ -215,12 +262,23 @@ class Calls:
     ``(phase, pc, a)`` (phase :attr:`Tracer.INIT` or :attr:`Tracer.CALL`), or those packed as 4
     bytes per call (``phase, pc lo, pc hi, a``); ``ports`` maps
     ``"init"``/``"call"`` to the ``$01`` value stored before such a call when it differs;
-    ``call_cycles`` (0: none) is each call's recorder deadline; ``times`` (default: once each)
-    how many calls back to back each queued call makes."""
+    ``call_cycles`` (0: none) is each call's cycle limit (``budget.unit_cycles`` when that is
+    set); ``times`` (default: once each) how many calls back to back each queued call makes.
+    ``budget`` (:class:`Budget`) limits each call and the whole queue.
+
+    An interrupt taken inside a call joins the call's record: its handler returns through the
+    sentinel and the interrupt is an event of the record (:attr:`Records.events`)."""
 
     # pylint: disable-next=too-many-arguments,too-many-positional-arguments
     def __init__(
-        self, recorder, queue, sentinel, ports=None, call_cycles=0, times=None
+        self,
+        recorder,
+        queue,
+        sentinel,
+        ports=None,
+        call_cycles=0,
+        times=None,
+        budget=None,
     ):
         if not CALLS:
             raise ImportError("the call queue needs vagrant_moses._core with smc_calls")
@@ -237,6 +295,7 @@ class Calls:
             ports.get("call"),
             call_cycles,
             None if times is None else list(times),
+            None if budget is None else tuple(budget),
         )
 
     @property
@@ -244,19 +303,93 @@ class Calls:
         """The queued calls not yet started."""
         return self.m.smc_calls_left
 
+    @property
+    def outcome(self) -> int:
+        """Why the run stopped: an index of :data:`STOPS` (0: no limit was hit)."""
+        return self.m.smc_outcome
+
     def close(self) -> None:
         """Close the open record once the run is over (halt ``jam`` or ``cycles``)."""
         self.m.smc_calls_close()
 
     def records(self) -> Records:
-        return Records(*self.m.smc_calls_records())
+        return Records(*self.m.smc_calls_records(), self.m.smc_calls_events())
 
     def take(self) -> Records:
         """:meth:`records`, emptied: the next record's changes are against the ``origin`` of
         the next take, the RAM the last record taken left."""
-        return Records(*self.m.smc_calls_take())
+        return Records(*self.m.smc_calls_take_all())
 
     def entries(self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int]]]:
         """``(entry_sp, entry_port)``: each call's ``(pc, sp)`` after its return frame and
-        ``(pc, port dir, port data)``, ascending."""
+        ``(pc, port dir, port data)``, ascending; interrupt handlers entered inside a call
+        count as calls."""
         return self.m.smc_calls_entries()
+
+
+class Frames:
+    """The interrupt frames of the armed ``recorder``'s machine (which needs a :class:`Tracer`
+    over ``sentinel``): each NMI or IRQ from its entry to its RTI is a record, recorded with no
+    Python call. A handler's pushed return is pointed at ``sentinel``, whose trap resumes the
+    interrupted code. An interrupt taken inside a frame is an event of its record, with the
+    instruction count of the interrupted context at the boundary it was taken at; BRK is no
+    frame. ``budget`` (:class:`Budget`) limits each frame and the run.
+
+    Run the machine in windows, :meth:`take` the closed frames after each, and :meth:`close`
+    at the end."""
+
+    def __init__(self, recorder, sentinel, budget=None):
+        if not FRAMES:
+            raise ImportError("the frames need vagrant_moses._core with smc_frames")
+        self.m = recorder.m
+        self.m.smc_frames(sentinel, None if budget is None else tuple(budget))
+
+    def take(self) -> Chunk:
+        """The frames closed since the last take, emptied: the next frame's changes are against
+        the RAM the last one left."""
+        *rec, entries, events = self.m.smc_frames_take()
+        return Chunk(Records(*rec), entries, events)
+
+    def _get(self):
+        return self.m.smc_frames_state()
+
+    @property
+    def image(self) -> Optional[bytes]:
+        """The RAM at the first entry (None before it)."""
+        return self._get()[0]
+
+    @property
+    def dirty(self) -> bool:
+        """RAM outside page 1 changed between two frames: the interrupted code does real work."""
+        return self._get()[1]
+
+    @property
+    def foreign(self) -> int:
+        """The kinds taken outside any frame, bit ``k`` for kind ``k`` (4: BRK)."""
+        return self._get()[2]
+
+    @property
+    def open(self) -> bool:
+        """Whether a frame is open: a run that ends now cuts it."""
+        return self._get()[3]
+
+    @property
+    def closed(self) -> int:
+        """The frames closed so far."""
+        return self._get()[4]
+
+    @property
+    def outcome(self) -> int:
+        """Why the run stopped: an index of :data:`STOPS` (0: no limit was hit)."""
+        return self.m.smc_outcome
+
+    def entries(self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int]]]:
+        """``(entry_sp, entry_port)``: each handler entry's ``(pc, sp)`` after the interrupt
+        frame it pushed and ``(pc, port dir, port data)``, ascending."""
+        return self.m.smc_frames_entries()
+
+    def close(self) -> None:
+        """Stop recording once the run is over; :meth:`take` still returns the closed frames.
+        A frame still open is closed as halted (``jam``, else ``cycles``) when the CPU jammed
+        or a limit stopped the run, else dropped, as a run's end cuts it."""
+        self.m.smc_frames_close()

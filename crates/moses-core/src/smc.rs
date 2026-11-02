@@ -8,6 +8,7 @@
 //! `RTS`/`RTI` return bytes) under the live bank view.
 
 use crate::calls::Calls;
+use crate::frames::Frames;
 use crate::sys::{banking, port_read, Sys, IO, RAM};
 use crate::trace::{Scan, Tracer};
 
@@ -67,6 +68,31 @@ pub const U_UNATTRIBUTED: u8 = 1;
 pub const UNCLASSIFIED: [&str; 2] = ["unowned", "unattributed"];
 /// How many unclassified events are kept as a sample.
 pub const SAMPLE: usize = 16;
+
+/// Why a run was stopped (`STOPS`); a unit is a call or a frame, a song all of them.
+pub const STOP_NONE: u8 = 0;
+pub const STOP_UNIT_CYCLES: u8 = 1;
+pub const STOP_UNIT_INSNS: u8 = 2;
+pub const STOP_SONG_CYCLES: u8 = 3;
+pub const STOP_SONG_INSNS: u8 = 4;
+pub const STOP_JAM: u8 = 5;
+pub const STOPS: [&str; 6] = [
+    "none",
+    "unit_cycles",
+    "unit_insns",
+    "song_cycles",
+    "song_insns",
+    "jam",
+];
+
+/// The cycles and instructions a unit and a song (the sum of its units) may run; 0: no limit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Budget {
+    pub unit_cycles: u64,
+    pub unit_insns: u64,
+    pub song_cycles: u64,
+    pub song_insns: u64,
+}
 
 const C_MAIN: u8 = 0;
 const C_IRQ: u8 = 1;
@@ -213,12 +239,27 @@ pub struct Recorder {
     /// A decode after this cycle stops the run and sets `timed_out`.
     pub deadline: i64,
     pub timed_out: bool,
+    song_deadline: i64,
+    insn_stop: u64,
+    song_insn_stop: u64,
+    /// Instructions decoded (the sentinel's fetches not counted).
+    pub insns: u64,
+    sentinel: u32,
+    budget: Budget,
+    unit: (i64, u64),
+    spent: (u64, u64),
+    /// The first limit that stopped the run (`STOPS`).
+    pub cause: u8,
+    /// The cycle of the decode that hit it.
+    pub cause_t: i64,
     /// The lift-fact and record trace, when armed.
     pub tracer: Option<Box<Tracer>>,
     /// The interrupt-driven main-context scan, when armed.
     pub scan: Option<Box<Scan>>,
     /// The native call queue the sentinel's trap runs, when armed.
     pub calls: Option<Box<Calls>>,
+    /// The interrupt frame recorder, when armed.
+    pub frames: Option<Box<Frames>>,
 }
 
 impl Recorder {
@@ -251,9 +292,89 @@ impl Recorder {
             sample: Vec::new(),
             deadline: i64::MAX,
             timed_out: false,
+            song_deadline: i64::MAX,
+            insn_stop: u64::MAX,
+            song_insn_stop: u64::MAX,
+            insns: 0,
+            sentinel: u32::MAX,
+            budget: Budget::default(),
+            unit: (0, 0),
+            spent: (0, 0),
+            cause: STOP_NONE,
+            cause_t: 0,
             tracer: None,
             scan: None,
             calls: None,
+            frames: None,
+        }
+    }
+
+    /// Meter units (calls or frames returning to `sentinel`) against `budget` from now.
+    pub fn meter(&mut self, budget: Budget, sentinel: u16) {
+        (self.budget, self.sentinel) = (budget, sentinel as u32);
+        (self.spent, self.cause) = ((0, 0), STOP_NONE);
+    }
+
+    /// A unit starts at cycle `t`: its limits, and the song's less what its units spent.
+    pub fn begin_unit(&mut self, t: i64) {
+        let b = self.budget;
+        let cap = |v: u64| v.min(i64::MAX as u64);
+        let (song_t, song_i) = (
+            cap(b.song_cycles.saturating_sub(self.spent.0)) as i64,
+            b.song_insns.saturating_sub(self.spent.1),
+        );
+        self.unit = (t, self.insns);
+        self.deadline = if b.unit_cycles == 0 {
+            i64::MAX
+        } else {
+            t.saturating_add(cap(b.unit_cycles) as i64)
+        };
+        self.song_deadline = if b.song_cycles == 0 {
+            i64::MAX
+        } else {
+            t.saturating_add(song_t)
+        };
+        self.insn_stop = if b.unit_insns == 0 {
+            u64::MAX
+        } else {
+            self.insns.saturating_add(b.unit_insns)
+        };
+        self.song_insn_stop = if b.song_insns == 0 {
+            u64::MAX
+        } else {
+            self.insns.saturating_add(song_i)
+        };
+        self.timed_out = false;
+    }
+
+    /// The unit ends at cycle `t`: its `(instructions, cycles)`, added to the song's.
+    pub fn end_unit(&mut self, t: i64) -> (u64, i64) {
+        let used = (self.insns - self.unit.1, t - self.unit.0);
+        self.spent = (self.spent.0 + used.1 as u64, self.spent.1 + used.0);
+        (self.deadline, self.song_deadline) = (i64::MAX, i64::MAX);
+        (self.insn_stop, self.song_insn_stop) = (u64::MAX, u64::MAX);
+        used
+    }
+
+    /// The instruction at `pc` was decoded.
+    #[inline(always)]
+    pub fn retire(&mut self, pc: u16) {
+        self.insns += (pc as u32 != self.sentinel) as u64;
+    }
+
+    fn breach(&self, pc: u16, t: i64) -> u8 {
+        if t > self.deadline {
+            STOP_UNIT_CYCLES
+        } else if t > self.song_deadline {
+            STOP_SONG_CYCLES
+        } else if pc as u32 == self.sentinel {
+            STOP_NONE
+        } else if self.insns >= self.insn_stop {
+            STOP_UNIT_INSNS
+        } else if self.insns >= self.song_insn_stop {
+            STOP_SONG_INSNS
+        } else {
+            STOP_NONE
         }
     }
 
@@ -434,7 +555,11 @@ impl Recorder {
             }
             self.index = (t - self.t0) / self.frame_cycles;
         }
-        let stop = t > self.deadline;
+        let cause = self.breach(pc, t);
+        let stop = cause != STOP_NONE;
+        if stop && self.cause == STOP_NONE {
+            (self.cause, self.cause_t) = (cause, t);
+        }
         self.timed_out |= stop;
         if let Some(tr) = self.tracer.as_deref_mut() {
             tr.decode(s, pc, a, x, y, sp, self.timed_out);
@@ -605,6 +730,54 @@ mod tests {
                 ((W_RESET, None, R_BANK, T_PRE, M_FLAT), 1),
             ]
         );
+    }
+
+    fn metered(b: Budget) -> Recorder {
+        let mut r = Recorder::new(Box::new([0; 0x10000]), [0; 256], false);
+        r.meter(b, 0xCFF0);
+        r
+    }
+
+    #[test]
+    fn a_unit_may_run_its_limit_and_the_next_decode_breaches() {
+        let mut r = metered(Budget {
+            unit_cycles: 10,
+            unit_insns: 3,
+            ..Budget::default()
+        });
+        r.begin_unit(100);
+        assert_eq!(r.breach(0x1000, 110), STOP_NONE);
+        assert_eq!(r.breach(0x1000, 111), STOP_UNIT_CYCLES);
+        (r.insns, r.deadline) = (2, i64::MAX);
+        assert_eq!(r.breach(0x1000, 0), STOP_NONE);
+        r.retire(0x1000);
+        r.retire(0xCFF0);
+        assert_eq!(r.insns, 3);
+        assert_eq!(r.breach(0xCFF0, 0), STOP_NONE);
+        assert_eq!(r.breach(0x1000, 0), STOP_UNIT_INSNS);
+    }
+
+    #[test]
+    fn a_song_limit_is_the_sum_of_what_its_units_spent() {
+        let mut r = metered(Budget {
+            song_cycles: 50,
+            song_insns: 9,
+            ..Budget::default()
+        });
+        r.begin_unit(0);
+        (r.insns, r.cause) = (4, STOP_NONE);
+        assert_eq!(r.end_unit(30), (4, 30));
+        r.begin_unit(500);
+        assert_eq!(r.breach(0x1000, 520), STOP_NONE);
+        assert_eq!(r.breach(0x1000, 521), STOP_SONG_CYCLES);
+        r.deadline = i64::MAX;
+        r.song_deadline = i64::MAX;
+        r.insns = 8;
+        assert_eq!(r.breach(0x1000, 0), STOP_NONE);
+        r.insns = 9;
+        assert_eq!(r.breach(0x1000, 0), STOP_SONG_INSNS);
+        r.end_unit(520);
+        assert_eq!(r.breach(0x1000, 1 << 40), STOP_NONE);
     }
 
     #[test]
