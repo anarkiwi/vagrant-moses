@@ -188,6 +188,8 @@ pub struct Tracer {
     base: Box<[u8; 0x10000]>,
     pub phase: u8,
     pub sp0: u8,
+    /// Whether the call phase's lift facts are kept (else only the records).
+    pub facts: bool,
     starts: Box<[u64]>,
     banks: Box<[u8]>,
     heights: Box<[u64]>,
@@ -212,6 +214,7 @@ impl Tracer {
             base: Box::new(*ram),
             phase: PH_NONE,
             sp0: 0,
+            facts: true,
             starts: vec![0; 0x10000 / 64].into_boxed_slice(),
             banks: vec![0; 0x10000].into_boxed_slice(),
             heights: vec![0; 0x10000 * HWORDS].into_boxed_slice(),
@@ -233,7 +236,7 @@ impl Tracer {
     pub fn access(&mut self, addr: u16, value: u8, write: bool) {
         if self.phase != PH_NONE && self.window(addr) {
             self.log.push((addr, value, write));
-            if write && self.phase == PH_CALL {
+            if write && self.phase == PH_CALL && self.facts {
                 self.stored(addr, value);
             }
         }
@@ -285,7 +288,7 @@ impl Tracer {
     #[allow(clippy::too_many_arguments)]
     pub fn decode(&mut self, s: &Sys, pc: u16, a: u8, x: u8, y: u8, sp: u8, timed_out: bool) {
         self.settle(s);
-        if self.phase != PH_CALL || pc == self.sentinel || timed_out {
+        if self.phase != PH_CALL || pc == self.sentinel || timed_out || !self.facts {
             return;
         }
         let h = (sp as i32 - self.sp0 as i32) as usize & 0x1FF;
@@ -333,6 +336,11 @@ impl Tracer {
         }
     }
 
+    /// The RAM the next record's changes are against.
+    pub fn base(&self) -> &[u8; 0x10000] {
+        &self.base
+    }
+
     /// Value the last instruction's stores once the run is over.
     pub fn finish(&mut self, s: &Sys) {
         self.settle(s);
@@ -343,13 +351,17 @@ impl Tracer {
         self.last = None;
         let (ram, base) = (&s.img[RAM], &mut *self.base);
         let mut idx = Vec::new();
-        let (words, olds) = (ram.as_chunks::<8>().0, base.as_chunks::<8>().0);
-        for (c, (r, b)) in words.iter().zip(olds).enumerate() {
+        let (pages, olds) = (ram.as_chunks::<256>().0, base.as_chunks_mut::<256>().0);
+        for (p, (r, b)) in pages.iter().zip(olds).enumerate() {
             if r != b {
-                idx.extend((0..8).filter(|&k| r[k] != b[k]).map(|k| (c * 8 + k) as u16));
+                idx.extend(
+                    (0..256)
+                        .filter(|&k| r[k] != b[k])
+                        .map(|k| (p * 256 + k) as u16),
+                );
+                b.copy_from_slice(r);
             }
         }
-        base.copy_from_slice(&ram[..]);
         let vals = idx.iter().map(|&i| ram[i as usize]).collect();
         Record {
             log: std::mem::take(&mut self.log),
