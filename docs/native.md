@@ -43,13 +43,14 @@ see, so such a hook holds its owner weakly.
 
 ## NativeSid
 
-`NativeSid(model, on_read)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a
+`NativeSid(model, on_read, rows=True)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a
 SID's traffic out of Python. The chip stays in Python, behind `on_read`.
 
 - `write(cycle, reg, value)` is logged natively. `drain_writes()` returns every write since
   the last drain as `(cycle, reg, value)`; `drain_rows()` returns those that changed
   their register, as `sidtrace` logs them (a write of the value `last[reg]` already holds is
-  omitted; `last` starts as `bytes(32)`). Both clear. Registers are the 5-bit offset, so the
+  omitted; `last` starts as `bytes(32)`; with `rows=False` none are kept). Both clear;
+  `drain_packed()` is `drain_writes()` as little-endian `i64` triples. Registers are the 5-bit offset, so the
   `$D400-$D7FF` mirrors land on the same log.
 - A read of `$19-$1C` calls `on_read(cycle, reg)` with the GIL re-acquired, after the events
   buffered so far. The callback drains the log into its chip, clocks it to `cycle` and

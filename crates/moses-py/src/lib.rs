@@ -1131,12 +1131,16 @@ impl NativeSid {
     }
 
     #[new]
-    fn new(model: &str, on_read: Py<PyAny>) -> PyResult<Self> {
+    #[pyo3(signature = (model, on_read, rows=true))]
+    fn new(model: &str, on_read: Py<PyAny>, rows: bool) -> PyResult<Self> {
         if !matches!(model, "6581" | "8580") {
             return Err(PyValueError::new_err("model must be '6581' or '8580'"));
         }
+        let shared = SidShared::new(model == "8580");
+        // SAFETY: the state is not shared yet.
+        unsafe { shared.state() }.keep_rows = rows;
         Ok(NativeSid {
-            shared: Arc::new(SidShared::new(model == "8580")),
+            shared: Arc::new(shared),
             on_read,
             owner: Owner::default(),
             model: model.to_owned(),
@@ -1166,6 +1170,17 @@ impl NativeSid {
     /// Every write since the last drain as `(cycle, reg, value)`.
     fn drain_writes(&self) -> PyResult<Vec<(i64, u8, u8)>> {
         Ok(std::mem::take(&mut self.state()?.writes))
+    }
+
+    /// :meth:`drain_writes` as little-endian `i64` `(cycle, reg, value)` triples.
+    fn drain_packed<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let w = std::mem::take(&mut self.state()?.writes);
+        let b: Vec<u8> = w
+            .iter()
+            .flat_map(|&(c, r, v)| [c, r as i64, v as i64])
+            .flat_map(i64::to_le_bytes)
+            .collect();
+        Ok(PyBytes::new(py, &b))
     }
 
     /// The writes since the last drain that changed their register, as `sidtrace` logs them.
