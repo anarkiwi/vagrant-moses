@@ -1,7 +1,7 @@
 //! The core on hand-assembled programs, with the cycle counts the 6510 documents.
 
 use moses_core::lines::{CIA, EV_ENTRY};
-use moses_core::machine::{BRK_LAYOUT, CLI, F, POPSR, R, RTI, SEI, W};
+use moses_core::machine::{BRK_LAYOUT, CLI, DP, F, POPSR, R, RTI, SEI, W};
 use std::sync::Arc;
 
 use moses_core::trace::{Tracer, PH_CALL};
@@ -44,17 +44,18 @@ fn layouts() -> Vec<Layout> {
         (0xA9, &[R, F], 1, 0),
         (0x8D, &[R, R, W, F], 2, 0),
         (0x4C, &[R, R, F], 2, 0),
-        (0xEA, &[R, F], 1, 0),
-        (0x58, &[R, CLI], 1, 0),
-        (0x78, &[R, SEI], 1, 0),
-        (0x40, &[R, R, POPSR, R, R, RTI], 2, 0),
+        (0xEA, &[DP, F], 1, 0),
+        (0x58, &[DP, CLI], 1, 0),
+        (0x78, &[DP, SEI], 1, 0),
+        (0x40, &[DP, R, POPSR, R, R, RTI], 2, 0),
         (0xAD, &[R, R, R, F], 3, 0),
     ];
     for (op, ents, exec_at, kind) in ops {
         table[op] = Layout {
             ents: ents.to_vec(),
             exec_at,
-            kind,
+            rmw: false,
+            mode: kind,
             base: (op as i32) << 3,
             branch: None,
         };

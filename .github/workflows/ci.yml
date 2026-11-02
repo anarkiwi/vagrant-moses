@@ -28,6 +28,13 @@ jobs:
         run: black --check src tests scripts tools
       - name: pylint
         run: pylint src tests scripts tools
+      - name: Cache SingleStepTests 6502 cases
+        uses: actions/cache@v4
+        with:
+          path: .harte-cache
+          key: harte-2f6980a2d957-100
+      - name: Bus cycles against SingleStepTests 6502
+        run: python tools/harte_cycles.py --cases 100
       - name: pytest + coverage (> 85%)
         run: pytest --cov=vagrant_moses --cov-report=term-missing --cov-fail-under=85
       - name: Differential run, Python vs native machine

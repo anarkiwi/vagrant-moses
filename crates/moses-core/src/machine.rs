@@ -8,7 +8,7 @@ use jennings_core::{AddrSet, Cpu};
 use crate::cia::Cia;
 use crate::lines::{self, Lines, MAX};
 use crate::reu::Reu;
-use crate::sched::Sched;
+use crate::sched::{Sched, PHI2};
 use crate::smc;
 use crate::sys::{BusRef, Host, SidDev, Sys, RAM};
 use crate::vic::Vic;
@@ -32,17 +32,20 @@ pub const FN: u8 = 14;
 pub const RTI: u8 = 15;
 pub const HALT: u8 = 16;
 pub const ANE: u8 = 17;
+/// A throw-away read of the byte after the opcode.
+pub const DP: u8 = 18;
+/// A throw-away read of the address [`Core::decode`] works out for the opcode's mode.
+pub const DA: u8 = 19;
 pub const BRK_ENTRIES: [u8; 7] = [BRK0, PUSHPCH, LOWPC, PUSHSR, VECLO, VECHI, FN];
 /// Index of [`BRK_ENTRIES`] in the layout table.
 pub const BRK_LAYOUT: usize = 256;
 
-/// What `Machine._decode` does for an opcode beyond laying out its cycles.
-pub const K_NONE: u8 = 0;
-pub const K_RMW: u8 = 1;
-pub const K_ABSX: u8 = 2;
-pub const K_ABSY: u8 = 3;
-pub const K_INDY: u8 = 4;
-pub const K_BRANCH: u8 = 5;
+/// The addressing an opcode's [`DA`] read derives from (`Machine._decode`).
+pub const M_NONE: u8 = 0;
+pub const M_ABSX: u8 = 1;
+pub const M_ABSY: u8 = 2;
+pub const M_INDY: u8 = 3;
+pub const M_RTS: u8 = 4;
 
 const ANE_MAGIC: u8 = 0xEF;
 const CLI_BASE: i32 = 0x58 << 3;
@@ -56,7 +59,8 @@ const IRQ_VECTOR: u16 = 0xFFFE;
 pub struct Layout {
     pub ents: Vec<u8>,
     pub exec_at: i32,
-    pub kind: u8,
+    pub rmw: bool,
+    pub mode: u8,
     pub base: i32,
     /// `(flag mask, wanted value)` of a conditional branch.
     pub branch: Option<(u8, bool)>,
@@ -104,6 +108,8 @@ pub struct Core {
     rmw: bool,
     taken: bool,
     cross: bool,
+    op_pc: u16,
+    dummy: u16,
     vec_addr: u16,
     target: u16,
     d1x1: bool,
@@ -175,6 +181,8 @@ impl Core {
             rmw: false,
             taken: false,
             cross: false,
+            op_pc: 0,
+            dummy: 0,
             vec_addr: 0,
             target: 0,
             d1x1: false,
@@ -194,6 +202,7 @@ impl Core {
     /// Bring the chips to `cycle` and start the CPU at `entry` (`Machine.reset`).
     pub fn reset<H: Host>(&mut self, h: &mut H, entry: u16, cycle: i64) {
         self.s.run_sched(cycle << 1);
+        self.s.sched.now = cycle << 1 | PHI2;
         self.s.flush(h);
         self.t = cycle;
         self.poke(0, 0x2F);
@@ -257,33 +266,41 @@ impl Core {
         }
         let pc = self.cpu.pc;
         let op = self.s.look(h, pc) as usize;
-        let (kind, base, branch) = {
-            let l = &self.layouts[op];
-            (l.kind, l.base, l.branch)
-        };
+        let l = &self.layouts[op];
+        let (mode, branch) = (l.mode, l.branch);
+        self.exec_at = l.exec_at;
+        self.base = l.base;
+        self.rmw = l.rmw;
         self.layout = op;
-        self.exec_at = self.layouts[op].exec_at;
-        self.base = base;
         self.idx = 0;
-        self.rmw = kind == K_RMW;
+        self.op_pc = pc;
         self.s.rmw = self.rmw;
+        let nxt = pc.wrapping_add(2);
         if let Some((mask, want)) = branch {
             self.taken = (self.cpu.p() & mask != 0) == want;
             let rel = self.s.look(h, pc.wrapping_add(1));
-            let nxt = pc.wrapping_add(2);
             let target = nxt.wrapping_add(rel as i8 as u16);
             self.cross = (target ^ nxt) & 0xFF00 != 0;
-        } else if kind != K_NONE {
-            let mut lo = self.s.look(h, pc.wrapping_add(1));
-            if kind == K_INDY {
-                lo = self.s.look(h, lo as u16);
-            }
-            let idx = if kind == K_ABSX {
+            self.dummy = nxt & 0xFF00 | target & 0xFF;
+        } else if mode == M_RTS {
+            let stack = |i: u8| self.s.img[RAM][0x100 | self.cpu.sp.wrapping_add(i) as usize];
+            self.dummy = u16::from_le_bytes([stack(1), stack(2)]);
+        } else if mode != M_NONE {
+            let (lo, hi) = if mode == M_INDY {
+                let ptr = self.s.look(h, pc.wrapping_add(1));
+                let lo = self.s.look(h, ptr as u16);
+                (lo, self.s.look(h, ptr.wrapping_add(1) as u16))
+            } else {
+                (self.s.look(h, pc.wrapping_add(1)), self.s.look(h, nxt))
+            };
+            let idx = if mode == M_ABSX {
                 self.cpu.x
             } else {
                 self.cpu.y
             };
-            self.cross = lo as u32 + idx as u32 > 0xFF;
+            let (low, cross) = lo.overflowing_add(idx);
+            self.cross = cross;
+            self.dummy = u16::from_le_bytes([low, hi]);
         }
         if !self.check() {
             self.s.ln.ic = MAX;
@@ -294,13 +311,14 @@ impl Core {
 
     /// `interruptsAndNextOpcode`: start an interrupt or the next opcode.
     fn fetch<H: Host>(&mut self, h: &mut H) {
-        let ln = &mut self.s.ln;
+        let ln = &self.s.ln;
         if ln.ic != MAX && ln.cc > ln.ic + 2 {
+            self.s.look(h, self.cpu.pc);
             self.layout = BRK_LAYOUT;
             self.idx = 0;
             self.base = 0;
             self.d1x1 = true;
-            ln.ic = MAX;
+            self.s.ln.ic = MAX;
         } else {
             self.decode(h);
         }
@@ -357,10 +375,24 @@ impl Core {
                     self.s.ln.cc += 1;
                 }
             }
+            DP | DA => {
+                let addr = if kind == DP {
+                    self.op_pc.wrapping_add(1)
+                } else {
+                    self.dummy
+                };
+                self.s.rd(h, addr);
+                if self.idx == self.exec_at {
+                    self.step(h);
+                }
+            }
             BR => {
                 if !self.taken {
                     self.fetch(h);
-                } else if !self.cross {
+                    return;
+                }
+                self.s.rd(h, self.op_pc.wrapping_add(2));
+                if !self.cross {
                     self.idx += 1;
                     self.s.ln.cc += 1;
                     if self.s.ln.ic >> 3 == self.s.ln.cc >> 3 {
@@ -389,6 +421,7 @@ impl Core {
                 self.fetch(h);
             }
             BRK0 => {
+                self.s.rd(h, self.cpu.pc.wrapping_add(!self.d1x1 as u16));
                 if !self.d1x1 {
                     self.cpu.pc = self.cpu.pc.wrapping_add(2);
                 }
