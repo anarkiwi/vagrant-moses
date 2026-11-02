@@ -9,6 +9,8 @@ reading any other register halves the time left; the value becomes 0 once it has
 
 from __future__ import annotations
 
+import itertools
+import struct
 from typing import Callable, List, Tuple
 
 BUS_TTL = {"6581": 0x01D00, "8580": 0xA2000}
@@ -20,10 +22,12 @@ Write = Tuple[int, int, int]
 class PyNativeSid:
     """Logs writes, models the bus value and asks ``on_read(cycle, reg)`` for ``$19-$1C``."""
 
-    def __init__(self, model: str, on_read: Callable[[int, int], int]):
+    def __init__(
+        self, model: str, on_read: Callable[[int, int], int], rows: bool = True
+    ):
         if model not in BUS_TTL:
             raise ValueError("model must be '6581' or '8580'")
-        self.model, self.on_read = model, on_read
+        self.model, self.on_read, self._keep_rows = model, on_read, rows
         self._ttl_model = BUS_TTL[model]
         self._writes: List[Write] = []
         self._rows: List[Write] = []
@@ -41,7 +45,7 @@ class PyNativeSid:
         self._bus, self._ttl = value, self._ttl_model
 
     def write(self, cycle: int, reg: int, value: int) -> None:
-        """Log a write; ``drain_rows`` keeps those that change the register."""
+        """Log a write; ``drain_rows`` keeps those that change the register (``rows``)."""
         if not 0 <= value <= 0xFF:
             raise ValueError("byte must be in range(0, 256)")
         reg &= 0x1F
@@ -50,7 +54,8 @@ class PyNativeSid:
         self._writes.append((cycle, reg, value))
         if self._last[reg] != value:
             self._last[reg] = value
-            self._rows.append((cycle, reg, value))
+            if self._keep_rows:
+                self._rows.append((cycle, reg, value))
 
     def read(self, cycle: int, reg: int) -> int:
         """``on_read`` for ``$19-$1C``, the decaying bus value for the rest."""
@@ -70,6 +75,11 @@ class PyNativeSid:
         """Every write since the last drain as ``(cycle, reg, value)``."""
         out, self._writes = self._writes, []
         return out
+
+    def drain_packed(self) -> bytes:
+        """:meth:`drain_writes` as little-endian int64 ``(cycle, reg, value)`` triples."""
+        out = self.drain_writes()
+        return struct.pack(f"<{3 * len(out)}q", *itertools.chain.from_iterable(out))
 
     def drain_rows(self) -> List[Write]:
         """The writes since the last drain that changed their register."""

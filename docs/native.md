@@ -34,15 +34,23 @@ the events buffered so far, so interleaving with SID writes is preserved. Withou
 write)`, when given, is called the same way at each I/O access the CPU or a DMA makes (the
 stream the trace logs, unwindowed); unset, it costs a branch.
 
+The machine, `NativeSid` and the views (`ram`, `mpu`, chips, `reu`) take part in Python's
+cyclic GC: they visit the devices, callbacks and hooks they hold, and a machine clears its
+hooks and views to break a cycle, so a machine whose hooks reach back to their owner is
+collected. A numpy array over a view is not visited (numpy arrays are not GC containers): an
+owner holding one and handing the machine a hook bound to itself is a cycle the GC cannot
+see, so such a hook holds its owner weakly.
+
 ## NativeSid
 
-`NativeSid(model, on_read)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a
+`NativeSid(model, on_read, rows=True)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a
 SID's traffic out of Python. The chip stays in Python, behind `on_read`.
 
 - `write(cycle, reg, value)` is logged natively. `drain_writes()` returns every write since
   the last drain as `(cycle, reg, value)`; `drain_rows()` returns those that changed
   their register, as `sidtrace` logs them (a write of the value `last[reg]` already holds is
-  omitted; `last` starts as `bytes(32)`). Both clear. Registers are the 5-bit offset, so the
+  omitted; `last` starts as `bytes(32)`; with `rows=False` none are kept). Both clear;
+  `drain_packed()` is `drain_writes()` as little-endian `i64` triples. Registers are the 5-bit offset, so the
   `$D400-$D7FF` mirrors land on the same log.
 - A read of `$19-$1C` calls `on_read(cycle, reg)` with the GIL re-acquired, after the events
   buffered so far. The callback drains the log into its chip, clocks it to `cycle` and
@@ -154,7 +162,7 @@ before a set.
 
 ## Call queue
 
-`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles)` (`smc.CALLS`) runs a
+`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles, times)` (`smc.CALLS`) runs a
 queue of `(phase, pc, a)` calls (`Tracer.INIT`/`Tracer.CALL`, or packed 4 bytes per call) back
 to back with no Python call per call (`crates/moses-core/src/calls.rs`). The sentinel traps
 natively: it closes the returning call's record (`Tracer.snap()` and the registers, when a
@@ -162,14 +170,18 @@ trace is armed), then stores `ports["init"]`/`ports["call"]` to `$01` when it di
 the recorder's calls (`begin()`, then `next_call()`), pushes `sentinel - 1` as host writes,
 sets A and the pc, and the recorder's deadline `call_cycles` (0: none) on. An empty queue
 stops the run; `left` counts the calls not started and `close()` closes the open record as
-halted `jam` or `cycles` once the run is over.
+halted `jam` or `cycles` once the run is over. `times` (default: once each) makes each queued call that many
+calls back to back, so a long run of one call is queued in constant memory.
 
 `records()` returns `Records(origin, meta, log, log_end, idx, vals, delta_end)` as
 little-endian bytes: per record `meta` `(phase, halt, a, x, y, sp, p)` (halt 0 return, 1 cycles,
 2 jam), its log entries `(addr u16, value, write)` ending at the `u64` `log_end`, and its RAM
 changes since the previous record (the first since `origin`, the RAM the trace was armed over)
 ending at `delta_end`. `entries()` returns each call's `(pc, sp)` after its return frame and
-`(pc, port dir, port data)`, ascending. The snap compares RAM to the previous record a 256-byte
+`(pc, port dir, port data)`, ascending. `take()` returns `records()` and empties them, the next record's
+changes then against the `origin` of the next take (the RAM the last record taken left): a
+run made `Machine.run` window by window, taking the records after each, holds one window's
+records and gives the records of one run. The snap compares RAM to the previous record a 256-byte
 page at a time, copying only the pages that changed.
 
 `vagrant_moses.smc.Scan(recorder, table, sentinel)` scans the main context of an

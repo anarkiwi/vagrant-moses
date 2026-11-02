@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import sys
 import threading
 
@@ -51,6 +52,15 @@ def test_writes_and_changed_rows_drain_and_clear(sid_cls):
     assert sid.last[7] == 0
     sid.write(5, 0x18, 15)
     assert sid.last[0x18] == 15 and sid.drain_rows() == [(5, 0x18, 15)]
+
+
+def test_writes_drain_packed_and_rows_may_be_left_unkept(sid_cls):
+    sid = sid_cls("6581", print, rows=False)
+    for cycle, reg, value in [(1, 7, 0), (2 << 40, 7, 5), (3, 7, 5)]:
+        sid.write(cycle, reg, value)
+    assert sid.drain_rows() == [] and sid.last[7] == 5
+    got = struct.unpack("<9q", sid.drain_packed())
+    assert got == (1, 7, 0, 2 << 40, 7, 5, 3, 7, 5) and sid.drain_packed() == b""
 
 
 def test_rejects_unknown_model_and_bad_byte(sid_cls):

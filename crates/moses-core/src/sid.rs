@@ -23,6 +23,8 @@ pub struct SidState {
     ttl_model: i64,
     pub writes: Vec<Write>,
     pub rows: Vec<Write>,
+    /// Whether `rows` is kept.
+    pub keep_rows: bool,
     pub last: [u8; REGS],
     bus: u8,
     ttl: i64,
@@ -35,6 +37,7 @@ impl SidState {
             ttl_model: if is_8580 { BUS_TTL_8580 } else { BUS_TTL_6581 },
             writes: Vec::new(),
             rows: Vec::new(),
+            keep_rows: true,
             last: [0; REGS],
             bus: 0,
             ttl: 0,
@@ -58,13 +61,13 @@ impl SidState {
         self.ttl = self.ttl_model;
     }
 
-    /// Log a write; `rows` keeps those that change the register.
+    /// Log a write; `rows` keeps those that change the register (when kept).
     pub fn write(&mut self, cycle: i64, reg: u8, value: u8) {
         self.age(cycle);
         self.drive(value);
         self.writes.push((cycle, reg, value));
         let last = &mut self.last[reg as usize % REGS];
-        if std::mem::replace(last, value) != value {
+        if std::mem::replace(last, value) != value && self.keep_rows {
             self.rows.push((cycle, reg, value));
         }
     }
