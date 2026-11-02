@@ -247,6 +247,7 @@ def _run(src, cycles, window=0, budget=None):
     rec.finish()
     fr.close()
     chunks.append(fr.take())
+    assert not fr.take().entries and not fr.open
     rows, events, nrec = [], [], 0
     for c in chunks:
         rows.append(np.frombuffer(c.entries, ENTRY))

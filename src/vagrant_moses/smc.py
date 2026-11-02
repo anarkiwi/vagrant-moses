@@ -348,8 +348,8 @@ class Frames:
     def take(self) -> Chunk:
         """The frames closed since the last take, emptied: the next frame's changes are against
         the RAM the last one left."""
-        if self._tail is not None:
-            out, self._tail = self._tail, None
+        if self._state is not None:
+            out, self._tail = self._tail or Chunk(Records(*[b""] * 7), b"", b""), None
             return out
         *rec, entries, events = self.m.smc_frames_take()
         return Chunk(Records(*rec), entries, events)
