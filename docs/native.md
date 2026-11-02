@@ -162,13 +162,13 @@ before a set.
 
 ## Call queue
 
-`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles, times)` (`smc.CALLS`) runs a
+`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles, times, budget)` (`smc.CALLS`) runs a
 queue of `(phase, pc, a)` calls (`Tracer.INIT`/`Tracer.CALL`, or packed 4 bytes per call) back
 to back with no Python call per call (`crates/moses-core/src/calls.rs`). The sentinel traps
 natively: it closes the returning call's record (`Tracer.snap()` and the registers, when a
 trace is armed), then stores `ports["init"]`/`ports["call"]` to `$01` when it differs, starts
 the recorder's calls (`begin()`, then `next_call()`), pushes `sentinel - 1` as host writes,
-sets A and the pc, and the recorder's deadline `call_cycles` (0: none) on. An empty queue
+sets A and the pc, and starts the unit's [budget](#budget-and-outcome) (`call_cycles` is `budget.unit_cycles` when that is 0). An empty queue
 stops the run; `left` counts the calls not started and `close()` closes the open record as
 halted `jam` or `cycles` once the run is over. `times` (default: once each) makes each queued call that many
 calls back to back, so a long run of one call is queued in constant memory.
@@ -177,12 +177,70 @@ calls back to back, so a long run of one call is queued in constant memory.
 little-endian bytes: per record `meta` `(phase, halt, a, x, y, sp, p)` (halt 0 return, 1 cycles,
 2 jam), its log entries `(addr u16, value, write)` ending at the `u64` `log_end`, and its RAM
 changes since the previous record (the first since `origin`, the RAM the trace was armed over)
-ending at `delta_end`. `entries()` returns each call's `(pc, sp)` after its return frame and
+ending at `delta_end`; `events` holds the interrupts taken inside the records ([below](#interrupt-frames)). `entries()` returns each call's `(pc, sp)` after its return frame and
 `(pc, port dir, port data)`, ascending. `take()` returns `records()` and empties them, the next record's
 changes then against the `origin` of the next take (the RAM the last record taken left): a
 run made `Machine.run` window by window, taking the records after each, holds one window's
 records and gives the records of one run. The snap compares RAM to the previous record a 256-byte
 page at a time, copying only the pages that changed.
+
+An interrupt entered inside a call (the call's phase `CALL`) is part of the call's record: its
+handler returns through the sentinel, whose trap resumes the interrupted code (the call's own
+return, an `RTS` to the sentinel, is told apart by the open interrupt contexts), and it is an
+event of the record ([events](#interrupt-frames)); the handler's entry joins `entries()`. BRK
+runs inside the context it is taken in; interrupts in an init call are not followed.
+`take()` returns the events with the records.
+
+## Interrupt frames
+
+`vagrant_moses.smc.Frames(recorder, sentinel, budget)` (`smc.FRAMES`; the recorder needs a
+`Tracer` over the same sentinel) records an interrupt-driven song's frames natively
+(`crates/moses-core/src/frames.rs`, hooked at the interrupt entry in `Core::special`): one
+record per interrupt, from its entry to its RTI, in `Calls`' packed form with phase `CALL`.
+
+An entry (NMI, or an IRQ from the video chip, a CIA or the REU; BRK is no frame) outside a
+frame opens a record: the tracer is synced (RAM that changed outside page 1 since the previous
+frame closed sets `dirty`), the origin of the first record of a chunk is the RAM at the entry,
+the pushed return address is rewritten to the sentinel through the host-write path, and the
+trace phase is `CALL` at the stack pointer after the pushes. The handler's RTI lands on the
+sentinel, whose trap pops the innermost context and resumes the interrupted pc; the outermost
+pop closes the record (halt return, the machine's registers). An interrupt taken right after
+that RTI, before the sentinel is decoded, finds the sentinel as its pushed return: it closes
+the frame (registers before the interrupt) and opens the next, whose interrupted pc is the
+closed frame's resume pc. Inside a frame an interrupt is an event of the record and a nested
+context (`depth` contexts open above the body); a BRK outside a frame sets bit 4 of `foreign`.
+RAM changes are one net delta per record; the log holds the device accesses in machine order,
+nested handlers' included.
+
+`take()` returns `Chunk(records, entries, events)` for the closed frames and empties them
+(the next chunk's changes are against its own `origin`); `close()` stops recording and the next
+`take()` returns the rest. `open` says a frame is open, `closed` counts the frames closed,
+`image` is the RAM at the first entry, `dirty` and `foreign` as above, `entries()` the handler
+entries `(pc, sp)` and `(pc, port dir, port data)`. A frame still open at `close()` is closed as
+halted (`jam`, else `cycles`) when the CPU jammed or a limit stopped the run, else dropped.
+
+The exact boundary: each context counts the instructions it retires (decodes, not the
+sentinel's and not interrupt-entry sequences; BRK and its handler count in the context they
+run in). An interrupt is taken at an instruction boundary, so an event's `icount` is the count
+of the interrupted context when it was taken; a nested handler counts only its own.
+
+| bytes | fields | dtype (`smc.*_FIELDS`) |
+| --- | --- | --- |
+| event, 21 | `record` u4 (index in the chunk), `icount` u4, `pos` u4 (device accesses logged in the record before the entry, nested handlers' included), `at` u2 (handler entry), `a x y sp p` u1 (before the interrupt; `sp` after the pushes plus 3, `p` as pushed), `depth` u1 (0: taken in the body), `kind` u1 | `EVENT_FIELDS` |
+| entry, 18 | `at` u2, `pc` u2 (interrupted), `a x y sp p` u1, `kind` u1, `insns` u4, `cycles` u4 (of the whole record) | `ENTRY_FIELDS` |
+
+`kind` indexes `smc.SOURCES` (`nmi`, `video_irq`, `cia_irq`, `reu_irq`). All little-endian.
+
+## Budget and outcome
+
+`smc.Budget(unit_cycles, unit_insns, song_cycles, song_insns)` (0: none) limits each unit (a
+call or a frame) and the whole run (the sum of its units), counting cycles from the machine's
+clock and instructions from the decode counter. A unit may run exactly its limit; the next
+decode that would exceed it stops the run before it executes. `Calls.outcome` and
+`Frames.outcome` index `smc.STOPS` (`none`, `unit_cycles`, `unit_insns`, `song_cycles`,
+`song_insns`, `jam`): the first limit that stopped the run, or `jam` when the CPU jammed. The
+open unit closes as halted `cycles` (`jam` on a jam); a frame cut by a limit has its cycles
+counted to the decode that hit it. The caller chooses the limits.
 
 `vagrant_moses.smc.Scan(recorder, table, sentinel)` scans the main context of an
 interrupt-driven phase from the decode after `start(frame_cycles)`: that decode's bank bits and

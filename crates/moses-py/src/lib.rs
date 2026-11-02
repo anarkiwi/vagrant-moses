@@ -14,9 +14,11 @@ use std::sync::{Arc, Mutex};
 
 use jennings_core::AddrSet;
 use moses_core::calls::{Calls, Records, HALT_CYCLES, HALT_JAM};
+use moses_core::frames::{Frames, EVENT_BYTES, ROW_BYTES, SOURCES};
 use moses_core::lines::NAMES;
 use moses_core::machine::{DA, M_RTS};
 use moses_core::reu::{geometry, REGS, SIZES};
+use moses_core::smc::{Budget, STOPS, STOP_JAM, STOP_NONE};
 use moses_core::sys::RAM;
 use moses_core::trace::{Facts, Scan, Tracer};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
@@ -364,6 +366,13 @@ impl Machine {
             .calls
             .as_deref_mut()
             .ok_or_else(|| PyRuntimeError::new_err("the call queue is not armed"))
+    }
+
+    fn frames<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Frames> {
+        self.rec(core)?
+            .frames
+            .as_deref_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("the frame recorder is not armed"))
     }
 
     fn tracer<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Tracer> {
@@ -1027,9 +1036,11 @@ impl Machine {
     /// Arm the native call queue: `queue` holds 4 bytes per call, `(phase, pc lo, pc hi, a)`
     /// (phase 1 init, 2 call); the sentinel at `sentinel` traps with no Python hook, closing
     /// the returning call's record and starting the next. `ports` are the `$01` values stored
-    /// before an init and a call (None: left alone), `call_cycles` (0: none) each call's budget,
-    /// `times` (default: once each) how many calls back to back each queued call makes.
-    #[pyo3(signature = (queue, sentinel, init_port=None, call_port=None, call_cycles=0, times=None))]
+    /// before an init and a call (None: left alone), `call_cycles` (0: none) each call's cycle
+    /// limit, `times` (default: once each) how many calls back to back each queued call makes,
+    /// `budget` `(unit cycles, unit insns, song cycles, song insns)` (0: none; the unit cycles
+    /// default to `call_cycles`).
+    #[pyo3(signature = (queue, sentinel, init_port=None, call_port=None, call_cycles=0, times=None, budget=None))]
     #[allow(clippy::too_many_arguments)]
     fn smc_calls(
         &self,
@@ -1039,6 +1050,7 @@ impl Machine {
         call_port: Option<u8>,
         call_cycles: i64,
         times: Option<Vec<u64>>,
+        budget: Option<(u64, u64, u64, u64)>,
     ) -> PyResult<()> {
         let q = octets(queue)?;
         if q.len() % 4 != 0 {
@@ -1062,7 +1074,13 @@ impl Machine {
         }
         let core = self.core()?;
         let ports = [init_port, call_port];
-        self.rec(core)?.calls = Some(Box::new(Calls::new(calls, ports, sentinel, call_cycles)));
+        let mut b = budget_of(budget);
+        if b.unit_cycles == 0 {
+            b.unit_cycles = call_cycles.max(0) as u64;
+        }
+        let r = self.rec(core)?;
+        r.meter(b, sentinel);
+        (r.calls, r.frames) = (Some(Box::new(Calls::new(calls, ports, sentinel))), None);
         let mut set = AddrSet::default();
         set.insert(sentinel);
         (core.watch, core.trap_set) = (Watch::Set(set), true);
@@ -1085,6 +1103,24 @@ impl Machine {
         }
         self.rec(core)?.calls = c;
         Ok(())
+    }
+
+    /// The interrupts taken inside the calls' records, as `EVENT` bytes (`Frames` in
+    /// `docs/native.md`).
+    fn smc_calls_events<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(
+            py,
+            &event_bytes(&self.calls(self.core()?)?.records),
+        ))
+    }
+
+    /// :meth:`smc_calls_take` and the events taken with the records.
+    fn smc_calls_take_all<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let calls = self.calls(self.core()?)?;
+        let r = std::mem::take(&mut calls.records);
+        let mut out = packed(py, &r);
+        out.push(PyBytes::new(py, &event_bytes(&r)));
+        Ok(out)
     }
 
     /// `(origin, meta, log, log_end, idx, vals, delta_end)` of the records (`Calls` in
@@ -1110,6 +1146,92 @@ impl Machine {
             c.entry_sp.iter().copied().collect(),
             c.entry_port.iter().copied().collect(),
         ))
+    }
+
+    /// Arm the interrupt frame recorder (the trace must be armed): handlers return to
+    /// `sentinel`, units are limited by `budget` `(unit cycles, unit insns, song cycles, song
+    /// insns)` (0: none).
+    #[pyo3(signature = (sentinel, budget=None))]
+    fn smc_frames(&self, sentinel: u16, budget: Option<(u64, u64, u64, u64)>) -> PyResult<()> {
+        let core = self.core()?;
+        let r = self.rec(core)?;
+        if r.tracer.is_none() {
+            return Err(PyRuntimeError::new_err("the trace is not armed"));
+        }
+        r.meter(budget_of(budget), sentinel);
+        (r.frames, r.calls) = (Some(Box::new(Frames::new(sentinel))), None);
+        let mut set = AddrSet::default();
+        set.insert(sentinel);
+        (core.watch, core.trap_set) = (Watch::Set(set), true);
+        Ok(())
+    }
+
+    /// Stop recording frames: a frame still open is closed as halted when the run jammed or a
+    /// limit stopped it, else dropped. Returns the tail `(records..., entries, events)`.
+    fn smc_frames_close<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let core = self.core()?;
+        let mut f = self.rec(core)?.frames.take();
+        let out = match f.as_deref_mut() {
+            Some(f) => {
+                let halted = core.jammed || self.rec(core)?.cause != STOP_NONE;
+                if halted {
+                    f.cut(core);
+                } else {
+                    f.discard(core);
+                }
+                Some(chunk_bytes(py, f))
+            }
+            None => None,
+        };
+        (core.watch, core.trap_set) = (Watch::Set(AddrSet::default()), false);
+        out.ok_or_else(|| PyRuntimeError::new_err("the frame recorder is not armed"))
+    }
+
+    /// The closed frames' `(origin, meta, log, log_end, idx, vals, delta_end, entries,
+    /// events)`, emptied.
+    fn smc_frames_take<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        Ok(chunk_bytes(py, self.frames(self.core()?)?))
+    }
+
+    /// `(image, dirty, foreign, open, closed)`: the RAM at the first entry (None before it),
+    /// whether RAM outside page 1 changed between frames, the kinds taken outside any frame
+    /// (bit `k`: kind `k`, 4 BRK), whether a frame is open and how many have closed.
+    #[allow(clippy::type_complexity)]
+    fn smc_frames_state<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<(Option<Bound<'py, PyBytes>>, bool, u8, bool, u64)> {
+        let f = self.frames(self.core()?)?;
+        Ok((
+            f.image.as_deref().map(|i| PyBytes::new(py, i)),
+            f.dirty,
+            f.foreign,
+            f.open(),
+            f.closed,
+        ))
+    }
+
+    /// `(entry_sp, entry_port)` of the handler entries, ascending.
+    #[allow(clippy::type_complexity)]
+    fn smc_frames_entries(&self) -> PyResult<(Vec<(u16, u8)>, Vec<(u16, u8, u8)>)> {
+        let f = self.frames(self.core()?)?;
+        Ok((
+            f.entry_sp.iter().copied().collect(),
+            f.entry_port.iter().copied().collect(),
+        ))
+    }
+
+    /// The first limit that stopped the run, an index of `STOPS` (`jam` when the CPU
+    /// jammed with no limit hit).
+    #[getter]
+    fn smc_outcome(&self) -> PyResult<u8> {
+        let core = self.core()?;
+        let cause = self.rec(core)?.cause;
+        Ok(if cause == STOP_NONE && core.jammed {
+            STOP_JAM
+        } else {
+            cause
+        })
     }
 }
 
@@ -1202,6 +1324,33 @@ impl NativeSid {
     fn last<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         Ok(PyBytes::new(py, &self.state()?.last))
     }
+}
+
+fn budget_of(b: Option<(u64, u64, u64, u64)>) -> Budget {
+    let (unit_cycles, unit_insns, song_cycles, song_insns) = b.unwrap_or_default();
+    Budget {
+        unit_cycles,
+        unit_insns,
+        song_cycles,
+        song_insns,
+    }
+}
+
+fn event_bytes(r: &Records) -> Vec<u8> {
+    let mut out = Vec::with_capacity(r.events.len() * EVENT_BYTES);
+    r.events.iter().for_each(|e| out.extend(e.bytes()));
+    out
+}
+
+/// A frame chunk as `packed` records, then the entry rows and the events.
+fn chunk_bytes<'py>(py: Python<'py>, f: &mut Frames) -> Vec<Bound<'py, PyBytes>> {
+    let c = f.take();
+    let mut out = packed(py, &c.records);
+    let mut rows = Vec::with_capacity(c.entries.len() * ROW_BYTES);
+    c.entries.iter().for_each(|e| rows.extend(e.bytes()));
+    out.push(PyBytes::new(py, &rows));
+    out.push(PyBytes::new(py, &event_bytes(&c.records)));
+    out
 }
 
 /// `Records` as the little-endian bytes `smc_calls_records` returns.
@@ -1539,5 +1688,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WatchAll>()?;
     m.add("WATCH_ALL", watch_all(m.py())?.clone_ref(m.py()))?;
     m.add("NAMES", PyTuple::new(m.py(), NAMES)?)?;
+    m.add("SOURCES", PyTuple::new(m.py(), SOURCES)?)?;
+    m.add("STOPS", PyTuple::new(m.py(), STOPS)?)?;
+    m.add("EVENT_BYTES", EVENT_BYTES)?;
+    m.add("ENTRY_BYTES", ROW_BYTES)?;
     Ok(())
 }
