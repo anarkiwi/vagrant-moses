@@ -204,6 +204,8 @@ class Machine(Bus):
     and ``write(cycle, reg, value)``, or to a :class:`NativeSid`, which the native machine
     logs without calling Python except for ``$D419-$D41C``; the ``$D400`` device answers the
     rest of ``$D400-$D7FF``. ``on_event(cycle, name)`` gets each raise, entry and RTI.
+    ``on_io(addr, value, write)`` gets each I/O access the CPU or a DMA makes while it runs,
+    with the value read or written.
     ``reu`` is the size in KiB of a 17xx REU at ``$DF00`` (``None``: none). ``roms`` maps a
     ROM base to its bytes and overrides sidplayfp's ROM-less set per ROM.
     """
@@ -221,6 +223,7 @@ class Machine(Bus):
         backend: Optional[str] = None,
         reu: Optional[int] = None,
         roms: Optional[Dict[int, bytes]] = None,
+        on_io: Optional[Callable[[int, int, bool], None]] = None,
         **_kwargs,
     ):
         """The native machine for ``backend="native"`` (the default when ``_core``
@@ -244,6 +247,7 @@ class Machine(Bus):
             lines,
             cycles_per_line,
             reu,
+            on_io=on_io,
         )
 
     def __init__(
@@ -255,6 +259,7 @@ class Machine(Bus):
         backend: Optional[str] = None,
         reu: Optional[int] = None,
         roms: Optional[Dict[int, bytes]] = None,
+        on_io: Optional[Callable[[int, int, bool], None]] = None,
     ):
         del backend
         mpu_cls = _jennings()[0]
@@ -272,6 +277,8 @@ class Machine(Bus):
         self.on_event = on_event or (
             lambda cycle, name: self.events.append((cycle, name))
         )
+        self.on_io = on_io
+        self._obs = None
         self.colour = bytearray(0x400)
         self.seed = 3686734
         self.asserted = [False] * len(SOURCES)
@@ -367,9 +374,13 @@ class Machine(Bus):
         else:
             value = (self.cia1 if page == 0xDC else self.cia2).read(addr)
         self.last_read = value
+        if self._obs:
+            self._obs(addr, value, False)
         return value
 
     def io_write(self, addr: int, value: int) -> None:
+        if self._obs:
+            self._obs(addr, value, True)
         page = addr >> 8
         if page < 0xD4:
             self.vic.write(addr, value)
@@ -441,6 +452,7 @@ class Machine(Bus):
         """Fetch the opcode at PC (``fetchNextOpcode``) and lay out its cycles."""
         mpu = self.mpu
         pc = mpu.pc
+        obs, self._obs = self._obs, None
         op = self[pc]
         self.ents, self.exec_at, kind, self.base, branch = Machine.LAYOUTS[op]
         self.idx, self.rmw = 0, kind == "rmw"
@@ -456,6 +468,7 @@ class Machine(Bus):
             if kind == "indy":
                 lo = self[lo]
             self.cross = lo + (mpu.x if kind == "absx" else mpu.y) > 0xFF
+        self._obs = obs
         if not self._check():
             self.ic = _MAX
         elif self.ic != _MAX:
@@ -561,6 +574,13 @@ class Machine(Bus):
 
     def run(self, limit: int) -> None:
         """Run the CPU and the chips up to cycle ``limit``."""
+        self._obs = self.on_io
+        try:
+            self._run(limit)
+        finally:
+            self._obs = None
+
+    def _run(self, limit: int) -> None:
         sched, mpu = self.sched, self.mpu
         t = self.t
         while t < limit and not self.jammed:

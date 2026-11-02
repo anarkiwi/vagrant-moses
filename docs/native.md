@@ -29,7 +29,9 @@ are passed in from `Machine.LAYOUTS`, so there is one table). VIC, CIA and the s
 never call Python. SID devices (`read(cycle, reg)`, `write(cycle, reg, value)`) and
 `on_event(cycle, name)` are called with the GIL re-acquired at those events only, after
 the events buffered so far, so interleaving with SID writes is preserved. Without
-`on_event`, events collect natively and `machine.events` lists them.
+`on_event`, events collect natively and `machine.events` lists them. `on_io(addr, value,
+write)`, when given, is called the same way at each I/O access the CPU or a DMA makes (the
+stream the trace logs, unwindowed); unset, it costs a branch.
 
 ## NativeSid
 
@@ -120,10 +122,10 @@ by no instruction. `deadline` stops the run at the first decode after that cycle
 
 ## Trace
 
-`vagrant_moses.smc.Tracer(recorder, table, sentinel, sid, image)` (`smc.TRACE`) adds to an
+`vagrant_moses.smc.Tracer(recorder, table, sentinel, window)` (`smc.TRACE`) adds to an
 armed recorder the lift facts of a call-driven run and one record per phase
-(`crates/moses-core/src/trace.rs`), fed at the recorder's decodes and at the SID window's bus
-accesses, with no Python call per instruction. The host marks phases with `phase(kind, sp0)`
+(`crates/moses-core/src/trace.rs`), fed at the recorder's decodes and at the I/O accesses the
+machine makes, with no Python call per instruction. The host marks phases with `phase(kind, sp0)`
 (`NONE`, `INIT`, `CALL` entered at `sp0`) from its trap.
 
 `table` is 256 little-endian `u16`, one per opcode: address form in bits 0-3 (1-9: `zp`, `zpx`,
@@ -134,14 +136,15 @@ records the start, stack height `sp - sp0` and bank bits per pc and the edge fro
 decode, and resolves the instruction's page-1 data addresses (`(ind)` pointer bytes, read and
 store addresses in `$0100-$01FF`, as a range per pc) and store addresses from the bytes it
 fetches and RAM. The next decode (or `finish()`) values the stores: the RAM byte where the CPU
-does not see I/O (and at `$00/$01`), else, outside the SID window, the stored register.
+does not see I/O (and at `$00/$01`), else, outside the window, the stored register.
 
-The SID window answers ahead of the machine's devices: the 32-byte devices at `lo..hi` step
-`$20`, the `$D400` one also for its `$D400-$D7FF` mirrors; a register reads the last value
-written there, else `image`'s byte. Every access in a phase is logged `(addr, value, write)`,
-and a write in `CALL` adds its value to the address's stored values. `snap()` closes a phase:
-its log and the RAM bytes changed since the previous snap (`idx` as little-endian `u16`, and
-their values). `facts()` returns `Facts(starts, edges, writes, page1, heights, banks)`,
+The trace observes and never answers: every CPU or DMA access to the I/O page at
+`window` (`(lo, hi)`, raw addresses, mirrors unfolded) in a phase is logged
+`(addr, value, write)` with the value the machine's chips and devices returned or took, and a
+write in `CALL` adds its value to the address's stored values. A host `machine[addr]`,
+`io_read` or `io_write` is not logged, nor the decode's look at an instruction's bytes.
+`snap()` closes a phase: its log and the RAM bytes changed since the previous snap (the first
+against RAM when the trace was armed; `idx` as little-endian `u16`, and their values). `facts()` returns `Facts(starts, edges, writes, page1, heights, banks)`,
 ascending (heights by their 16-bit two's-complement value). Starts, heights, banks, stored
 values and page-1 ranges are fixed-size tables; edges pass a two-entry successor cache per pc
 before a set.

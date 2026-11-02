@@ -4,12 +4,14 @@ use moses_core::lines::{CIA, EV_ENTRY};
 use moses_core::machine::{BRK_LAYOUT, CLI, F, POPSR, R, RTI, SEI, W};
 use std::sync::Arc;
 
+use moses_core::trace::{Tracer, PH_CALL};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared};
 
 #[derive(Default)]
 struct Log {
     sid: Vec<(i64, u8, u8)>,
     reads: Vec<u8>,
+    io: Vec<(u16, u8, bool)>,
 }
 
 impl Host for Log {
@@ -26,6 +28,9 @@ impl Host for Log {
     }
     fn decode(&mut self, _core: &mut Core) {}
     fn port_write(&mut self, _core: &mut Core) {}
+    fn io(&mut self, addr: u16, value: u8, write: bool) {
+        self.io.push((addr, value, write));
+    }
 }
 
 fn image() -> Box<[u8; 0x10000]> {
@@ -228,4 +233,56 @@ fn the_recorder_reports_a_store_into_a_later_operand_once() {
         )]
     );
     assert_eq!(rec.unclassified, 0);
+}
+
+#[test]
+fn the_trace_observes_the_io_values_the_machine_answers() {
+    let program = [
+        0xA9, 0x55, 0x8D, 0x00, 0xD4, // write the SID bus latch
+        0xAD, 0x05, 0xD4, 0xAD, 0x1B, 0xD4, // an unreadable register, then OSC3
+        0xAD, 0x12, 0xD0, 0x8D, 0x00, 0x20, // raster
+        0xAD, 0x04, 0xDC, 0x8D, 0x01, 0x20, // CIA 1 timer A
+        0xAD, 0x00, 0xDE, 0x8D, 0x02, 0x20, // open I/O 1
+        0x4C, 0x1D, 0x10,
+    ];
+    let late = [0xAD, 0x05, 0xD4, 0x4C, 0x03, 0x11];
+    let shared = Arc::new(SidShared::new(false));
+    let mut c = core_with(
+        &[(0x1000, &program), (0x1100, &late)],
+        SidDev::Logged(Arc::clone(&shared), 0),
+        None,
+    );
+    let mut rec = Recorder::new(image(), [1; 256], true);
+    rec.begin(c.s.bits);
+    let mut tr = Tracer::new([0; 256], 0xFFFF, 0xD000, 0xE000, &c.s.img[0]);
+    tr.phase = PH_CALL;
+    rec.tracer = Some(Box::new(tr));
+    c.s.rec = Some(Box::new(rec));
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    c.run(&mut host, 2200);
+    c.reset(&mut host, 0x1100, 2200 + 0x1D00);
+    c.run(&mut host, 2200 + 0x1D00 + 20);
+    let seen = host.io.clone();
+    for addr in [0xD012, 0xD405, 0xDC04] {
+        c.peek(&mut host, addr);
+    }
+    let mut tr = c.s.rec.as_mut().unwrap().tracer.take().unwrap();
+    let log = tr.snap(&c.s).log;
+    let ram = &c.s.img[0];
+    assert_eq!(
+        log,
+        [
+            (0xD400, 0x55, true),
+            (0xD405, 0x55, false),
+            (0xD41B, 0, false),
+            (0xD012, ram[0x2000], false),
+            (0xDC04, ram[0x2001], false),
+            (0xDE00, ram[0x2002], false),
+            (0xD405, 0, false),
+        ]
+    );
+    assert_eq!(host.reads, [0x1B]);
+    assert_eq!(host.io, seen);
+    assert_eq!(log, seen);
 }

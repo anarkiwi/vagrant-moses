@@ -39,6 +39,8 @@ pub trait Host {
     fn trap(&mut self, core: &mut crate::Core) -> bool;
     fn decode(&mut self, core: &mut crate::Core);
     fn port_write(&mut self, core: &mut crate::Core);
+    /// An I/O access the CPU or a DMA made: `value` read from or written to `addr`.
+    fn io(&mut self, _addr: u16, _value: u8, _write: bool) {}
     /// A callback failed: the run ends at the next cycle.
     fn failed(&self) -> bool {
         false
@@ -141,9 +143,17 @@ impl Sys {
         }
     }
 
-    /// The recorder's trace, which answers the SID window ahead of the devices.
-    fn tracer(&mut self) -> Option<&mut crate::trace::Tracer> {
-        self.rec.as_deref_mut()?.tracer.as_deref_mut()
+    /// Hand an I/O access the CPU or a DMA made to the recorder's trace and the host.
+    fn observe<H: Host>(&mut self, h: &mut H, addr: u16, value: u8, write: bool) {
+        if let Some(t) = self
+            .rec
+            .as_deref_mut()
+            .and_then(|r| r.tracer.as_deref_mut())
+        {
+            t.access(addr, value, write);
+        }
+        self.flush(h);
+        h.io(addr, value, write);
     }
 
     fn sid(sids: &[(u32, SidDev)], addr: u16) -> Option<&SidDev> {
@@ -187,7 +197,21 @@ impl Sys {
         go
     }
 
+    /// A CPU or DMA read of the I/O byte `addr`, observed.
     pub fn io_read<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
+        let v = self.io_get(h, addr);
+        self.observe(h, addr, v, false);
+        v
+    }
+
+    /// A CPU or DMA write of the I/O byte `addr`, observed.
+    pub fn io_write<H: Host>(&mut self, h: &mut H, addr: u16, value: u8) {
+        self.observe(h, addr, value, true);
+        self.io_put(h, addr, value);
+    }
+
+    /// A read of the I/O byte `addr` as the chips answer it.
+    pub fn io_get<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
         let page = addr >> 8;
         let value = if let Some(v) = self.reu_read(addr) {
             v
@@ -195,18 +219,16 @@ impl Sys {
             self.vic.read(addr, &mut self.sched, &mut self.ln)
         } else if !(0xD8..0xDE).contains(&page) {
             let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
-            let traced = self.tracer().and_then(|t| t.sid_read(addr));
-            match (traced, Self::sid(&self.sids, addr)) {
-                (Some(v), _) => v,
-                (None, None) => {
+            match Self::sid(&self.sids, addr) {
+                None => {
                     self.seed = self.seed.wrapping_mul(1664525).wrapping_add(1013904223);
                     self.seed as u8
                 }
-                (None, Some(&SidDev::Host(dev))) => {
+                Some(&SidDev::Host(dev)) => {
                     self.flush(h);
                     h.sid_read(dev, cycle, reg)
                 }
-                (None, Some(SidDev::Logged(state, dev))) => {
+                Some(SidDev::Logged(state, dev)) => {
                     // SAFETY: serialised by the machine's run claim; no reference outlives the call.
                     let peeked = unsafe { state.state() }.peek(cycle, reg);
                     match peeked {
@@ -232,7 +254,8 @@ impl Sys {
         value
     }
 
-    pub fn io_write<H: Host>(&mut self, h: &mut H, addr: u16, value: u8) {
+    /// A write of the I/O byte `addr` as the chips take it.
+    pub fn io_put<H: Host>(&mut self, h: &mut H, addr: u16, value: u8) {
         let page = addr >> 8;
         if page == 0xDF && (self.reu.is_some() || self.dma) {
             if let Some(r) = self.reu.as_mut() {
@@ -243,17 +266,14 @@ impl Sys {
             self.vic.write(addr, value, &mut self.sched, &mut self.ln);
         } else if !(0xD8..0xDE).contains(&page) {
             let (cycle, reg) = (self.sched.time(PHI1), (addr & 0x1F) as u8);
-            let traced = self.tracer().is_some_and(|t| t.sid_write(addr, value));
-            match (traced, Self::sid(&self.sids, addr)) {
-                (true, _) | (false, None) => {}
-                (false, Some(&SidDev::Host(dev))) => {
+            match Self::sid(&self.sids, addr) {
+                None => {}
+                Some(&SidDev::Host(dev)) => {
                     self.flush(h);
                     h.sid_write(dev, cycle, reg, value);
                 }
                 // SAFETY: serialised by the machine's run claim; no reference outlives the call.
-                (false, Some(SidDev::Logged(state, _))) => {
-                    unsafe { state.state() }.write(cycle, reg, value)
-                }
+                Some(SidDev::Logged(state, _)) => unsafe { state.state() }.write(cycle, reg, value),
             }
         } else if page < 0xDC {
             self.colour[(addr & 0x3FF) as usize] = value & 0x0F;
@@ -263,12 +283,28 @@ impl Sys {
         }
     }
 
+    /// A read as the CPU makes it, I/O observed.
     #[inline(always)]
     pub fn rd<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
+        self.read::<H, true>(h, addr)
+    }
+
+    /// A read as the CPU would make it, unobserved: the host's and the decode's look.
+    #[inline(always)]
+    pub fn look<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
+        self.read::<H, false>(h, addr)
+    }
+
+    #[inline(always)]
+    fn read<H: Host, const OBS: bool>(&mut self, h: &mut H, addr: u16) -> u8 {
         if addr > 1 {
             let k = self.map[(addr >> 12) as usize];
             if k == IO {
-                self.io_read(h, addr)
+                if OBS {
+                    self.io_read(h, addr)
+                } else {
+                    self.io_get(h, addr)
+                }
             } else {
                 self.img[k as usize][addr as usize]
             }
