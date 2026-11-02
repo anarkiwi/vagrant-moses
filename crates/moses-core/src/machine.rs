@@ -238,7 +238,18 @@ impl Core {
             }
             while self.watch.contains(self.cpu.pc) {
                 self.s.flush(h);
-                if !h.trap(self) {
+                let calls = self.s.rec.as_deref_mut().and_then(|r| r.calls.take());
+                let go = match calls {
+                    Some(mut c) => {
+                        let go = c.trap(self);
+                        if let Some(r) = self.s.rec.as_deref_mut() {
+                            r.calls = Some(c);
+                        }
+                        go
+                    }
+                    None => h.trap(self),
+                };
+                if !go {
                     break;
                 }
                 self.record();

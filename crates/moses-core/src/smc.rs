@@ -7,6 +7,7 @@
 //! reads as control (opcode, operands, indirect pointers with the `JMP ($xxFF)` page wrap,
 //! `RTS`/`RTI` return bytes) under the live bank view.
 
+use crate::calls::Calls;
 use crate::sys::{banking, port_read, Sys, IO, RAM};
 use crate::trace::{Scan, Tracer};
 
@@ -216,6 +217,8 @@ pub struct Recorder {
     pub tracer: Option<Box<Tracer>>,
     /// The interrupt-driven main-context scan, when armed.
     pub scan: Option<Box<Scan>>,
+    /// The native call queue the sentinel's trap runs, when armed.
+    pub calls: Option<Box<Calls>>,
 }
 
 impl Recorder {
@@ -250,6 +253,7 @@ impl Recorder {
             timed_out: false,
             tracer: None,
             scan: None,
+            calls: None,
         }
     }
 

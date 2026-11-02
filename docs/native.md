@@ -149,6 +149,28 @@ ascending (heights by their 16-bit two's-complement value). Starts, heights, ban
 values and page-1 ranges are fixed-size tables; edges pass a two-entry successor cache per pc
 before a set.
 
+`Tracer(..., facts=False)` keeps the log and records but no lift facts.
+
+## Call queue
+
+`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles)` (`smc.CALLS`) runs a
+queue of `(phase, pc, a)` calls (`Tracer.INIT`/`Tracer.CALL`, or packed 4 bytes per call) back
+to back with no Python call per call (`crates/moses-core/src/calls.rs`). The sentinel traps
+natively: it closes the returning call's record (`Tracer.snap()` and the registers, when a
+trace is armed), then stores `ports["init"]`/`ports["call"]` to `$01` when it differs, starts
+the recorder's calls (`begin()`, then `next_call()`), pushes `sentinel - 1` as host writes,
+sets A and the pc, and the recorder's deadline `call_cycles` (0: none) on. An empty queue
+stops the run; `left` counts the calls not started and `close()` closes the open record as
+halted `jam` or `cycles` once the run is over.
+
+`records()` returns `Records(origin, meta, log, log_end, idx, vals, delta_end)` as
+little-endian bytes: per record `meta` `(phase, halt, a, x, y, sp, p)` (halt 0 return, 1 cycles,
+2 jam), its log entries `(addr u16, value, write)` ending at the `u64` `log_end`, and its RAM
+changes since the previous record (the first since `origin`, the RAM the trace was armed over)
+ending at `delta_end`. `entries()` returns each call's `(pc, sp)` after its return frame and
+`(pc, port dir, port data)`, ascending. The snap compares RAM to the previous record a 256-byte
+page at a time, copying only the pages that changed.
+
 `vagrant_moses.smc.Scan(recorder, table, sentinel)` scans the main context of an
 interrupt-driven phase from the decode after `start(frame_cycles)`: that decode's bank bits and
 RAM `$0314` and `$FFFE` words, then each decode in the main context (the recorder's interrupt

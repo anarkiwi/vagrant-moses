@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use jennings_core::AddrSet;
+use moses_core::calls::{Calls, HALT_CYCLES, HALT_JAM};
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
 use moses_core::reu::{geometry, REGS, SIZES};
@@ -345,6 +346,13 @@ impl Machine {
             .scan
             .as_deref_mut()
             .ok_or_else(|| PyRuntimeError::new_err("the scan is not armed"))
+    }
+
+    fn calls<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Calls> {
+        self.rec(core)?
+            .calls
+            .as_deref_mut()
+            .ok_or_else(|| PyRuntimeError::new_err("the call queue is not armed"))
     }
 
     fn tracer<'a>(&self, core: &'a mut Core) -> PyResult<&'a mut Tracer> {
@@ -879,11 +887,21 @@ impl Machine {
     }
 
     /// Arm the recorder's trace: per-opcode `table` (256 little-endian `u16`), calls returning
-    /// to `sentinel`, the I/O accesses at `lo..hi` logged, RAM changes from now.
-    fn smc_trace(&self, table: &Bound<'_, PyAny>, sentinel: u16, lo: u16, hi: u32) -> PyResult<()> {
+    /// to `sentinel`, the I/O accesses at `lo..hi` logged, RAM changes from now; `facts`
+    /// false keeps only the records.
+    #[pyo3(signature = (table, sentinel, lo, hi, facts=true))]
+    fn smc_trace(
+        &self,
+        table: &Bound<'_, PyAny>,
+        sentinel: u16,
+        lo: u16,
+        hi: u32,
+        facts: bool,
+    ) -> PyResult<()> {
         let t = table16(table)?;
         let core = self.core()?;
-        let tr = Tracer::new(t, sentinel, lo, hi, &core.s.img[RAM]);
+        let mut tr = Tracer::new(t, sentinel, lo, hi, &core.s.img[RAM]);
+        tr.facts = facts;
         self.rec(core)?.tracer = Some(Box::new(tr));
         Ok(())
     }
@@ -965,6 +983,98 @@ impl Machine {
             .map(|&e| ((e >> 16) as u16, e as u16))
             .collect();
         Ok((starts, edges, writes, page1, heights, banks))
+    }
+
+    /// Arm the native call queue: `queue` holds 4 bytes per call, `(phase, pc lo, pc hi, a)`
+    /// (phase 1 init, 2 call); the sentinel at `sentinel` traps with no Python hook, closing
+    /// the returning call's record and starting the next. `ports` are the `$01` values stored
+    /// before an init and a call (None: left alone), `call_cycles` (0: none) each call's budget.
+    #[pyo3(signature = (queue, sentinel, init_port=None, call_port=None, call_cycles=0))]
+    fn smc_calls(
+        &self,
+        queue: &Bound<'_, PyAny>,
+        sentinel: u16,
+        init_port: Option<u8>,
+        call_port: Option<u8>,
+        call_cycles: i64,
+    ) -> PyResult<()> {
+        let q = octets(queue)?;
+        if q.len() % 4 != 0 {
+            return Err(PyValueError::new_err("the queue holds 4 bytes per call"));
+        }
+        let mut calls = Vec::with_capacity(q.len() / 4);
+        for c in q.as_chunks::<4>().0 {
+            if !(1..=2).contains(&c[0]) {
+                return Err(PyValueError::new_err(
+                    "a call's phase is 1 (init) or 2 (call)",
+                ));
+            }
+            calls.push((c[0], u16::from_le_bytes([c[1], c[2]]), c[3]));
+        }
+        let core = self.core()?;
+        let ports = [init_port, call_port];
+        self.rec(core)?.calls = Some(Box::new(Calls::new(calls, ports, sentinel, call_cycles)));
+        let mut set = AddrSet::default();
+        set.insert(sentinel);
+        (core.watch, core.trap_set) = (Watch::Set(set), true);
+        Ok(())
+    }
+
+    /// The queued calls not yet started.
+    #[getter]
+    fn smc_calls_left(&self) -> PyResult<usize> {
+        Ok(self.calls(self.core()?)?.left())
+    }
+
+    /// Close the open record once the run is over: halted on a jam, else out of cycles.
+    fn smc_calls_close(&self) -> PyResult<()> {
+        let core = self.core()?;
+        let mut c = self.rec(core)?.calls.take();
+        if let Some(c) = c.as_deref_mut() {
+            let halt = if core.jammed { HALT_JAM } else { HALT_CYCLES };
+            c.snap(core, halt);
+        }
+        self.rec(core)?.calls = c;
+        Ok(())
+    }
+
+    /// `(origin, meta, log, log_end, idx, vals, delta_end)` of the records (`Calls` in
+    /// `docs/native.md`), as bytes: `meta` 7 per record, `log` 4 per access, `idx` `u16`
+    /// and the ends `u64`, little-endian.
+    #[allow(clippy::type_complexity)]
+    fn smc_calls_records<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let r = &self.calls(self.core()?)?.records;
+        let log: Vec<u8> = r
+            .log
+            .iter()
+            .flat_map(|&(a, v, w)| [a as u8, (a >> 8) as u8, v, w as u8])
+            .collect();
+        let le16: Vec<u8> = r.idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+        let le64 = |v: &[u64]| -> Vec<u8> { v.iter().flat_map(|i| i.to_le_bytes()).collect() };
+        let meta: Vec<u8> = r.meta.concat();
+        Ok([
+            &r.origin[..],
+            &meta,
+            &log,
+            &le64(&r.log_end),
+            &le16,
+            &r.vals,
+            &le64(&r.delta_end),
+        ]
+        .iter()
+        .map(|b| PyBytes::new(py, b))
+        .collect())
+    }
+
+    /// `(entry_sp, entry_port)`: the `(pc, sp)` and `(pc, port dir, port data)` call entries,
+    /// ascending.
+    #[allow(clippy::type_complexity)]
+    fn smc_calls_entries(&self) -> PyResult<(Vec<(u16, u8)>, Vec<(u16, u8, u8)>)> {
+        let c = self.calls(self.core()?)?;
+        Ok((
+            c.entry_sp.iter().copied().collect(),
+            c.entry_port.iter().copied().collect(),
+        ))
     }
 }
 
