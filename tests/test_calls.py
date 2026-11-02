@@ -99,13 +99,24 @@ def _python_run(queue, ports, call_cycles, facts=True):
     return out, tuple(map(sorted, entries)), tr.facts(), rec.events(), len(queue)
 
 
-def _native_run(queue, ports, call_cycles, facts=True):
+def _native_run(queue, ports, call_cycles, facts=True, window=0):
+    """The queue run natively; with ``window``, run that many cycles at a time and the
+    records taken after each."""
     m, rec, tr, labels = _machine(facts)
     calls = smc.Calls(rec, queue, labels["idle"], ports, call_cycles)
-    m.run(m.reset(labels["idle"]) + 100_000)
+    end, out = m.reset(labels["idle"]) + 100_000, []
+    while window and m.cycle < end and not m.stop:
+        m.run(min(end, m.cycle + window))
+        out += _unpack(calls.take())
+    m.run(end)
     rec.finish()
     calls.close()
-    r = calls.records()
+    out += _unpack(calls.records())
+    return out, calls.entries(), tr.facts(), rec.events(), calls.left
+
+
+def _unpack(r):
+    """``[(meta, log, idx, vals)]`` per record of ``r``."""
     meta = [tuple(r.meta[k : k + 7]) for k in range(0, len(r.meta), 7)]
     ends = [struct.unpack_from("<Q", e, k)[0] for e in (r.log_end, r.delta_end)
             for k in range(0, len(e), 8)]  # fmt: skip
@@ -118,8 +129,8 @@ def _native_run(queue, ports, call_cycles, facts=True):
             (mt, log, r.idx[2 * do : 2 * delta_end[k]], r.vals[do : delta_end[k]])
         )
         lo, do = log_end[k], delta_end[k]
-    assert r.origin[ORG] == 0xA9
-    return out, calls.entries(), tr.facts(), rec.events(), calls.left
+    assert not meta or r.origin[ORG] == 0xA9
+    return out
 
 
 def _labels():
@@ -144,6 +155,30 @@ def test_the_queue_runs_as_a_python_trap_would(calls, ports, call_cycles, facts)
     assert bool(nat[2].starts) == facts
     if "spin" in dict(calls):
         assert nat[0][-1][0][1] == 1 and nat[4] == 1
+
+
+def test_records_taken_while_the_queue_runs_are_the_records_of_one_run():
+    labels = _labels()
+    queue = [(1, labels["init"], 0)] + [(2, labels["play"], 0)] * 40
+    whole = _native_run(queue, {}, 0)
+    assert len(whole[0]) == 41
+    assert _native_run(queue, {}, 0, window=300) == whole
+
+
+def test_a_take_leaves_the_next_records_against_the_ram_it_left():
+    m, rec, _, labels = _machine()
+    calls = smc.Calls(rec, [(2, labels["play"], 0)] * 30, labels["idle"])
+    t = m.reset(labels["idle"])
+    m.run(t + 300)
+    first = calls.take()
+    assert first.meta and not any(calls.records()[1:])
+    m.run(t + 100_000)
+    assert calls.records().meta
+    ram = bytearray(first.origin)
+    for _, _, idx, vals in _unpack(first):
+        for k, v in zip(struct.iter_unpack("<H", idx), vals):
+            ram[k[0]] = v
+    assert calls.records().origin == bytes(ram)
 
 
 def test_a_packed_queue_and_bad_queues():

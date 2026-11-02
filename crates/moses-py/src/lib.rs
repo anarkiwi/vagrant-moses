@@ -10,10 +10,10 @@ use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use jennings_core::AddrSet;
-use moses_core::calls::{Calls, HALT_CYCLES, HALT_JAM};
+use moses_core::calls::{Calls, Records, HALT_CYCLES, HALT_JAM};
 use moses_core::lines::NAMES;
 use moses_core::machine::{DA, M_RTS};
 use moses_core::reu::{geometry, REGS, SIZES};
@@ -24,6 +24,7 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::pyclass::{PyTraverseError, PyVisit};
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PySlice, PyTuple};
 
@@ -78,6 +79,14 @@ struct Hooks {
     trap: Option<Py<PyAny>>,
     decode: Option<Py<PyAny>>,
     port: Option<Py<PyAny>>,
+}
+
+impl Hooks {
+    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.trap)?;
+        visit.call(&self.decode)?;
+        visit.call(&self.port)
+    }
 }
 
 /// Singleton for "watch every address".
@@ -276,7 +285,7 @@ pub struct Machine {
     owner: Owner,
     active: AtomicPtr<Core>,
     ntsc: bool,
-    views: [OnceLock<Py<Memory>>; 6],
+    views: Mutex<[Option<Py<Memory>>; 6]>,
 }
 
 // SAFETY: every access holds the GIL; while a run is detached, `owner` refuses all threads
@@ -307,18 +316,20 @@ impl Machine {
 
     /// The one view of memory `which` (0 RAM, 1 colour RAM, 2-4 BASIC/CHARGEN/KERNAL, 5 REU).
     fn view(slf: &Bound<'_, Self>, which: u8) -> PyResult<Py<Memory>> {
-        let cell = &slf.get().views[which as usize];
-        if let Some(v) = cell.get() {
-            return Ok(v.clone_ref(slf.py()));
+        let py = slf.py();
+        let views = &slf.get().views;
+        if let Some(v) = &views.lock().unwrap()[which as usize] {
+            return Ok(v.clone_ref(py));
         }
         let v = Py::new(
-            slf.py(),
+            py,
             Memory {
                 machine: slf.clone().unbind(),
                 which,
             },
         )?;
-        Ok(cell.get_or_init(|| v).clone_ref(slf.py()))
+        let mut views = views.lock().unwrap();
+        Ok(views[which as usize].get_or_insert(v).clone_ref(py))
     }
 
     fn host(&self) -> PyHost<'_> {
@@ -453,6 +464,34 @@ impl Machine {
             ntsc,
             views: Default::default(),
         })
+    }
+
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for d in &self.devs {
+            visit.call(&d.obj)?;
+        }
+        for sid in &self.logged {
+            visit.call(sid)?;
+        }
+        visit.call(&self.sids)?;
+        visit.call(&self.sink)?;
+        visit.call(&self.on_io)?;
+        // SAFETY: the GIL is held and no hook is being installed.
+        unsafe { &*self.hooks.get() }.traverse(&visit)?;
+        // A view being created holds the lock and is counted as an outside reference.
+        if let Ok(views) = self.views.try_lock() {
+            for v in views.iter() {
+                visit.call(v)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the hooks and the views, which hold the machine: the cycles through it.
+    fn __clear__(&self) {
+        *self.hooks() = Hooks::default();
+        let views = std::mem::take(&mut *self.views.lock().unwrap());
+        drop(views);
     }
 
     #[classattr]
@@ -1041,29 +1080,15 @@ impl Machine {
     /// `(origin, meta, log, log_end, idx, vals, delta_end)` of the records (`Calls` in
     /// `docs/native.md`), as bytes: `meta` 7 per record, `log` 4 per access, `idx` `u16`
     /// and the ends `u64`, little-endian.
-    #[allow(clippy::type_complexity)]
     fn smc_calls_records<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
-        let r = &self.calls(self.core()?)?.records;
-        let log: Vec<u8> = r
-            .log
-            .iter()
-            .flat_map(|&(a, v, w)| [a as u8, (a >> 8) as u8, v, w as u8])
-            .collect();
-        let le16: Vec<u8> = r.idx.iter().flat_map(|i| i.to_le_bytes()).collect();
-        let le64 = |v: &[u64]| -> Vec<u8> { v.iter().flat_map(|i| i.to_le_bytes()).collect() };
-        let meta: Vec<u8> = r.meta.concat();
-        Ok([
-            &r.origin[..],
-            &meta,
-            &log,
-            &le64(&r.log_end),
-            &le16,
-            &r.vals,
-            &le64(&r.delta_end),
-        ]
-        .iter()
-        .map(|b| PyBytes::new(py, b))
-        .collect())
+        Ok(packed(py, &self.calls(self.core()?)?.records))
+    }
+
+    /// :meth:`smc_calls_records`, emptied: the next record's changes are against `origin`, the
+    /// RAM the last record taken left.
+    fn smc_calls_take<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyBytes>>> {
+        let calls = self.calls(self.core()?)?;
+        Ok(packed(py, &std::mem::take(&mut calls.records)))
     }
 
     /// `(entry_sp, entry_port)`: the `(pc, sp)` and `(pc, port dir, port data)` call entries,
@@ -1101,6 +1126,10 @@ impl NativeSid {
 
 #[pymethods]
 impl NativeSid {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.on_read)
+    }
+
     #[new]
     fn new(model: &str, on_read: Py<PyAny>) -> PyResult<Self> {
         if !matches!(model, "6581" | "8580") {
@@ -1148,6 +1177,30 @@ impl NativeSid {
     fn last<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         Ok(PyBytes::new(py, &self.state()?.last))
     }
+}
+
+/// `Records` as the little-endian bytes `smc_calls_records` returns.
+fn packed<'py>(py: Python<'py>, r: &Records) -> Vec<Bound<'py, PyBytes>> {
+    let log: Vec<u8> = r
+        .log
+        .iter()
+        .flat_map(|&(a, v, w)| [a as u8, (a >> 8) as u8, v, w as u8])
+        .collect();
+    let le16: Vec<u8> = r.idx.iter().flat_map(|i| i.to_le_bytes()).collect();
+    let le64 = |v: &[u64]| -> Vec<u8> { v.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    let meta: Vec<u8> = r.meta.concat();
+    [
+        &r.origin[..],
+        &meta,
+        &log,
+        &le64(&r.log_end),
+        &le16,
+        &r.vals,
+        &le64(&r.delta_end),
+    ]
+    .iter()
+    .map(|b| PyBytes::new(py, b))
+    .collect()
 }
 
 fn to_watch(watch: &Bound<'_, PyAny>) -> PyResult<Watch> {
@@ -1199,6 +1252,10 @@ impl Memory {
 
 #[pymethods]
 impl Memory {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.machine)
+    }
+
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         Ok(self.raw(py)?.1)
     }
@@ -1287,6 +1344,10 @@ impl Reu {
 
 #[pymethods]
 impl Reu {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.machine)
+    }
+
     /// The expansion RAM (bytearray-like, zero-copy).
     #[getter]
     fn ram(&self, py: Python<'_>) -> PyResult<Py<Memory>> {
@@ -1336,6 +1397,10 @@ macro_rules! registers {
     ($(($get:ident, $set:ident, $field:ident, $ty:ty, $mask:expr)),*) => {
         #[pymethods]
         impl Registers {
+            fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.machine)
+    }
+
             $(
                 #[getter]
                 fn $get(&self) -> PyResult<$ty> {
@@ -1394,6 +1459,10 @@ pub struct Chip {
 
 #[pymethods]
 impl Chip {
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.machine)
+    }
+
     /// The register file as written (CIA: the register shadow).
     #[getter]
     fn regs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {

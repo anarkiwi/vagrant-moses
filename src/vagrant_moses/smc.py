@@ -243,6 +243,11 @@ class Calls:
     def records(self) -> Records:
         return Records(*self.m.smc_calls_records())
 
+    def take(self) -> Records:
+        """:meth:`records`, emptied: the next record's changes are against the ``origin`` of
+        the next take, the RAM the last record taken left."""
+        return Records(*self.m.smc_calls_take())
+
     def entries(self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int]]]:
         """``(entry_sp, entry_port)``: each call's ``(pc, sp)`` after its return frame and
         ``(pc, port dir, port data)``, ascending."""

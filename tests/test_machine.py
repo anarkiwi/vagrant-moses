@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import builtins
+import gc
 import collections
 import functools
 import sys
+import weakref
 
 import pytest
 
@@ -464,3 +466,24 @@ def test_the_cpu_extra_is_required(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_jennings)
     with pytest.raises(ImportError, match=r"vagrant-moses\[cpu\]"):
         Machine()
+
+
+def test_cycles_through_the_native_machine_are_collected():
+    """A machine whose hooks, devices and views reach back to their owner is collected."""
+
+    class Owner:
+        def hook(self, *_):
+            return self
+
+    o = Owner()
+    o.sid = vm.NativeSid("6581", o.hook)
+    o.m = Machine(backend="native", sids={mm.SID_BASE: o.sid}, reu=128, on_event=o.hook,
+                  on_io=o.hook)  # fmt: skip
+    o.m.set_trap(o.hook, {0})
+    o.m.set_decode_hook(o.hook)
+    o.m.on_port_write(o.hook)
+    o.views = (o.m.ram, o.m.mpu, o.m.vic, o.m.reu, o.m.reu.ram)
+    ref = weakref.ref(o)
+    del o
+    gc.collect()
+    assert ref() is None

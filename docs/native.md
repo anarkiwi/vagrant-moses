@@ -34,6 +34,13 @@ the events buffered so far, so interleaving with SID writes is preserved. Withou
 write)`, when given, is called the same way at each I/O access the CPU or a DMA makes (the
 stream the trace logs, unwindowed); unset, it costs a branch.
 
+The machine, `NativeSid` and the views (`ram`, `mpu`, chips, `reu`) take part in Python's
+cyclic GC: they visit the devices, callbacks and hooks they hold, and a machine clears its
+hooks and views to break a cycle, so a machine whose hooks reach back to their owner is
+collected. A numpy array over a view is not visited (numpy arrays are not GC containers): an
+owner holding one and handing the machine a hook bound to itself is a cycle the GC cannot
+see, so such a hook holds its owner weakly.
+
 ## NativeSid
 
 `NativeSid(model, on_read)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a
@@ -169,7 +176,10 @@ little-endian bytes: per record `meta` `(phase, halt, a, x, y, sp, p)` (halt 0 r
 2 jam), its log entries `(addr u16, value, write)` ending at the `u64` `log_end`, and its RAM
 changes since the previous record (the first since `origin`, the RAM the trace was armed over)
 ending at `delta_end`. `entries()` returns each call's `(pc, sp)` after its return frame and
-`(pc, port dir, port data)`, ascending. The snap compares RAM to the previous record a 256-byte
+`(pc, port dir, port data)`, ascending. `take()` returns `records()` and empties them, the next record's
+changes then against the `origin` of the next take (the RAM the last record taken left): a
+run made `Machine.run` window by window, taking the records after each, holds one window's
+records and gives the records of one run. The snap compares RAM to the previous record a 256-byte
 page at a time, copying only the pages that changed.
 
 `vagrant_moses.smc.Scan(recorder, table, sentinel)` scans the main context of an
