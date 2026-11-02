@@ -7,14 +7,13 @@ name = "vagrant-moses"
 version = "0.9.3"
 description = "Standalone C64 machine model: memory map, banked bus and ROMs, VIC-II and CIAs over a two-phase scheduler, a cycle-exact 6510 machine, KERNAL traps, IRQ dispatch, and native d64/d71/d81/t64 media extraction"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 authors = [{ name = "Josh Bailey" }]
 keywords = ["c64", "6510", "mos6510", "c64k", "irq", "interrupt", "sid", "retrocomputing", "d64", "d81", "t64"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: System :: Emulators",
@@ -66,7 +65,7 @@ show_missing = true
 
 [tool.black]
 line-length = 88
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.pylint.main]
 disable = "all"

@@ -24,7 +24,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      # abi3-py311: one cp311-abi3 wheel per platform serves 3.11+.
+      # abi3-py312: one cp312-abi3 wheel per platform serves 3.12+.
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
