@@ -26,8 +26,11 @@ pub struct Records {
 }
 
 pub struct Calls {
-    queue: Vec<(u8, u16, u8)>,
+    /// `((phase, pc, a), times)`: each entry runs `times` calls back to back.
+    queue: Vec<((u8, u16, u8), u64)>,
     next: usize,
+    started: u64,
+    left: u64,
     ports: [Option<u8>; 2],
     sentinel: u16,
     call_cycles: i64,
@@ -40,18 +43,22 @@ pub struct Calls {
 }
 
 impl Calls {
-    /// `queue` of `(phase, pc, a)` (phase `PH_INIT` or `PH_CALL`); `ports` `[init, call]` the
+    /// `queue` of `((phase, pc, a), times)` (phase `PH_INIT` or `PH_CALL`), each entry run
+    /// `times` calls back to back; `ports` `[init, call]` the
     /// `$01` value the host stores before such a call when it differs; `call_cycles` (0: none)
     /// the cycles a call may run before the recorder stops the run.
     pub fn new(
-        queue: Vec<(u8, u16, u8)>,
+        mut queue: Vec<((u8, u16, u8), u64)>,
         ports: [Option<u8>; 2],
         sentinel: u16,
         call_cycles: i64,
     ) -> Calls {
+        queue.retain(|&(_, times)| times > 0);
         Calls {
+            left: queue.iter().map(|&(_, times)| times).sum(),
             queue,
             next: 0,
+            started: 0,
             ports,
             sentinel,
             call_cycles,
@@ -63,8 +70,8 @@ impl Calls {
     }
 
     /// The calls not yet started.
-    pub fn left(&self) -> usize {
-        self.queue.len() - self.next
+    pub fn left(&self) -> u64 {
+        self.left
     }
 
     fn host_write(core: &mut Core, addr: u16, value: u8) {
@@ -107,11 +114,14 @@ impl Calls {
     /// stop the run (false) when none is left.
     pub fn trap(&mut self, core: &mut Core) -> bool {
         self.snap(core, HALT_RETURN);
-        let Some(&(phase, pc, a)) = self.queue.get(self.next) else {
+        let Some(&((phase, pc, a), times)) = self.queue.get(self.next) else {
             core.stop = true;
             return false;
         };
-        self.next += 1;
+        (self.started, self.left) = (self.started + 1, self.left - 1);
+        if self.started == times {
+            (self.next, self.started) = (self.next + 1, 0);
+        }
         self.cur = phase;
         let sp0 = core.cpu.sp.wrapping_sub(2);
         if let Some(tr) = core

@@ -1027,8 +1027,10 @@ impl Machine {
     /// Arm the native call queue: `queue` holds 4 bytes per call, `(phase, pc lo, pc hi, a)`
     /// (phase 1 init, 2 call); the sentinel at `sentinel` traps with no Python hook, closing
     /// the returning call's record and starting the next. `ports` are the `$01` values stored
-    /// before an init and a call (None: left alone), `call_cycles` (0: none) each call's budget.
-    #[pyo3(signature = (queue, sentinel, init_port=None, call_port=None, call_cycles=0))]
+    /// before an init and a call (None: left alone), `call_cycles` (0: none) each call's budget,
+    /// `times` (default: once each) how many calls back to back each queued call makes.
+    #[pyo3(signature = (queue, sentinel, init_port=None, call_port=None, call_cycles=0, times=None))]
+    #[allow(clippy::too_many_arguments)]
     fn smc_calls(
         &self,
         queue: &Bound<'_, PyAny>,
@@ -1036,19 +1038,27 @@ impl Machine {
         init_port: Option<u8>,
         call_port: Option<u8>,
         call_cycles: i64,
+        times: Option<Vec<u64>>,
     ) -> PyResult<()> {
         let q = octets(queue)?;
         if q.len() % 4 != 0 {
             return Err(PyValueError::new_err("the queue holds 4 bytes per call"));
         }
+        let times = match times {
+            Some(t) if t.len() != q.len() / 4 => {
+                return Err(PyValueError::new_err("one count per queued call"));
+            }
+            Some(t) => t,
+            None => vec![1; q.len() / 4],
+        };
         let mut calls = Vec::with_capacity(q.len() / 4);
-        for c in q.as_chunks::<4>().0 {
+        for (c, n) in q.as_chunks::<4>().0.iter().zip(times) {
             if !(1..=2).contains(&c[0]) {
                 return Err(PyValueError::new_err(
                     "a call's phase is 1 (init) or 2 (call)",
                 ));
             }
-            calls.push((c[0], u16::from_le_bytes([c[1], c[2]]), c[3]));
+            calls.push(((c[0], u16::from_le_bytes([c[1], c[2]]), c[3]), n));
         }
         let core = self.core()?;
         let ports = [init_port, call_port];
@@ -1061,7 +1071,7 @@ impl Machine {
 
     /// The queued calls not yet started.
     #[getter]
-    fn smc_calls_left(&self) -> PyResult<usize> {
+    fn smc_calls_left(&self) -> PyResult<u64> {
         Ok(self.calls(self.core()?)?.left())
     }
 

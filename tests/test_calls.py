@@ -99,11 +99,12 @@ def _python_run(queue, ports, call_cycles, facts=True):
     return out, tuple(map(sorted, entries)), tr.facts(), rec.events(), len(queue)
 
 
-def _native_run(queue, ports, call_cycles, facts=True, window=0):
+# pylint: disable-next=too-many-arguments,too-many-positional-arguments
+def _native_run(queue, ports, call_cycles, facts=True, window=0, times=None):
     """The queue run natively; with ``window``, run that many cycles at a time and the
     records taken after each."""
     m, rec, tr, labels = _machine(facts)
-    calls = smc.Calls(rec, queue, labels["idle"], ports, call_cycles)
+    calls = smc.Calls(rec, queue, labels["idle"], ports, call_cycles, times)
     end, out = m.reset(labels["idle"]) + 100_000, []
     while window and m.cycle < end and not m.stop:
         m.run(min(end, m.cycle + window))
@@ -163,6 +164,18 @@ def test_records_taken_while_the_queue_runs_are_the_records_of_one_run():
     whole = _native_run(queue, {}, 0)
     assert len(whole[0]) == 41
     assert _native_run(queue, {}, 0, window=300) == whole
+
+
+def test_a_queued_call_made_times_over_is_that_call_queued_as_often():
+    labels = _labels()
+    init, play = (1, labels["init"], 0), (2, labels["play"], 0)
+    whole = _native_run([init] + [play] * 30, {}, 0)
+    assert _native_run([init, play, play], {}, 0, times=[1, 0, 30]) == whole
+    m, rec, _, _ = _machine()
+    with pytest.raises(ValueError):
+        smc.Calls(rec, [init], labels["idle"], times=[1, 2])
+    assert smc.Calls(rec, [init, play], labels["idle"], times=[2, 3]).left == 5
+    assert m.smc_calls_left == 5
 
 
 def test_a_take_leaves_the_next_records_against_the_ram_it_left():

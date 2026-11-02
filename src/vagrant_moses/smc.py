@@ -215,10 +215,13 @@ class Calls:
     ``(phase, pc, a)`` (phase :attr:`Tracer.INIT` or :attr:`Tracer.CALL`), or those packed as 4
     bytes per call (``phase, pc lo, pc hi, a``); ``ports`` maps
     ``"init"``/``"call"`` to the ``$01`` value stored before such a call when it differs;
-    ``call_cycles`` (0: none) is each call's recorder deadline."""
+    ``call_cycles`` (0: none) is each call's recorder deadline; ``times`` (default: once each)
+    how many calls back to back each queued call makes."""
 
     # pylint: disable-next=too-many-arguments,too-many-positional-arguments
-    def __init__(self, recorder, queue, sentinel, ports=None, call_cycles=0):
+    def __init__(
+        self, recorder, queue, sentinel, ports=None, call_cycles=0, times=None
+    ):
         if not CALLS:
             raise ImportError("the call queue needs vagrant_moses._core with smc_calls")
         self.m = recorder.m
@@ -228,7 +231,12 @@ class Calls:
             )
         ports = ports or {}
         self.m.smc_calls(
-            queue, sentinel, ports.get("init"), ports.get("call"), call_cycles
+            queue,
+            sentinel,
+            ports.get("init"),
+            ports.get("call"),
+            call_cycles,
+            None if times is None else list(times),
         )
 
     @property

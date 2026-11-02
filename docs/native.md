@@ -162,7 +162,7 @@ before a set.
 
 ## Call queue
 
-`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles)` (`smc.CALLS`) runs a
+`vagrant_moses.smc.Calls(recorder, queue, sentinel, ports, call_cycles, times)` (`smc.CALLS`) runs a
 queue of `(phase, pc, a)` calls (`Tracer.INIT`/`Tracer.CALL`, or packed 4 bytes per call) back
 to back with no Python call per call (`crates/moses-core/src/calls.rs`). The sentinel traps
 natively: it closes the returning call's record (`Tracer.snap()` and the registers, when a
@@ -170,7 +170,8 @@ trace is armed), then stores `ports["init"]`/`ports["call"]` to `$01` when it di
 the recorder's calls (`begin()`, then `next_call()`), pushes `sentinel - 1` as host writes,
 sets A and the pc, and the recorder's deadline `call_cycles` (0: none) on. An empty queue
 stops the run; `left` counts the calls not started and `close()` closes the open record as
-halted `jam` or `cycles` once the run is over.
+halted `jam` or `cycles` once the run is over. `times` (default: once each) makes each queued call that many
+calls back to back, so a long run of one call is queued in constant memory.
 
 `records()` returns `Records(origin, meta, log, log_end, idx, vals, delta_end)` as
 little-endian bytes: per record `meta` `(phase, halt, a, x, y, sp, p)` (halt 0 return, 1 cycles,
