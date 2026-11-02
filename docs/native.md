@@ -13,6 +13,7 @@ backend="native"|"python")` picks one, native when `_core` imports and the class
 | `crates/moses-py` | PyO3 extension `vagrant_moses._core`: `Machine`, `Memory`, `Registers`, `Chip`, `NativeSid`. |
 | `tools/build_native.sh` | Build the extension next to the package for in-tree runs. |
 | `tools/diff_machines.py` | Differential run of random programs on both backends. |
+| `tools/harte_cycles.py` | Bus cycles of every opcode against SingleStepTests 6502 cases (`docs/c64.md`, Bus cycles). |
 | `tools/bench_machine.py` | Playroutine-shaped and SID-write-heavy benchmark of both backends, with no SID, a Python device or a `NativeSid`. |
 | `tools/thread_machines.py` | N machines on N threads against one (`--sid` for `NativeSid`). |
 | `src/vagrant_moses/sid.py` | `PyNativeSid`, the pure-Python `NativeSid` the Python machine uses. |

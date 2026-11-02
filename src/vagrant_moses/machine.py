@@ -16,7 +16,7 @@ from .roms import rom_less
 from .sid import PyNativeSid
 from .cia import Cia
 from .reu import Reu
-from .eventsched import PHI1, Event, Scheduler
+from .eventsched import PHI1, PHI2, Event, Scheduler
 from .vicii import Vic
 
 try:
@@ -30,7 +30,10 @@ _MAX = 65536
 # Entry kinds of libsidplayfp's per-opcode cycle tables; those below R write.
 W, PUSHPCH, LOWPC, PUSHSR = range(4)
 R, X2, F, CLI, SEI, POPSR, BR, BRK0, VECLO, VECHI, FN, RTI, HALT, ANE = range(4, 18)
+# Throw-away reads: the byte after the opcode, and the address the opcode's mode works out.
+DP, DA = 18, 19
 FETCHES = frozenset((F, CLI, SEI, RTI, FN))
+_READS = (R, X2, DP, DA)
 BRK_ENTRIES = (BRK0, PUSHPCH, LOWPC, PUSHSR, VECLO, VECHI, FN)
 _ANE_MAGIC = 0xEF
 _CLI_BASE, _SEI_BASE = 0x58 << 3, 0x78 << 3
@@ -64,12 +67,12 @@ _OP_TAIL = {
     "PLP": (R, POPSR),
     "JSR": (R, W, W, R, F),
     "JMP": (F,),
-    "RTS": (R, R, R, R),
+    "RTS": (R, R, R, DA),
     "RTI": (R, POPSR, R, R, RTI),
 }
 _PREFIX = {
-    "impl": (R,),
-    "acc": (R,),
+    "impl": (DP,),
+    "acc": (DP,),
     "imm": (R,),
     "rel": (R,),
     "zp": (R,),
@@ -116,14 +119,14 @@ def opcode_layout(op: int) -> Tuple[Tuple[int, ...], int, str]:
     rmw = mn in _RMW_OPS and mode != "acc"
     if mode in ("absx", "absy", "indy"):
         skip = X2 if reads else R
-        prefix = (R, skip, R) if mode != "indy" else (R, R, skip, R)
+        prefix = (R, skip, DA) if mode != "indy" else (R, R, skip, DA)
     elif mn == "JSR":
         prefix = (R,)
     else:
         prefix = _PREFIX[mode]
     ents = list(prefix) + ([R] if reads or rmw else [])
     if mn in _BRANCHES:
-        ents += [BR, R]
+        ents += [BR, DA]
     elif rmw:
         ents += [W, W]
     elif mn in _STORE_OPS:
@@ -134,7 +137,7 @@ def opcode_layout(op: int) -> Tuple[Tuple[int, ...], int, str]:
         ents += [F]
     if ents[-1] not in FETCHES:
         ents.append(F)
-    exec_at = next(i for i, k in enumerate(ents) if k not in (R, X2)) - 1
+    exec_at = next(i for i, k in enumerate(ents) if k not in _READS) - 1
     kind = "branch" if mn in _BRANCHES else "rmw" if rmw else mode if X2 in ents else ""
     return tuple(ents), exec_at, kind
 
@@ -144,11 +147,13 @@ def _layouts():
     out = []
     for op in range(256):
         ents, exec_at, kind = opcode_layout(op)
-        out.append((ents, exec_at + 1, kind, op << 3, _BRANCHES.get(opcodes[op][0])))
+        mn, mode = opcodes[op]
+        mode = "rts" if mn == "RTS" else mode if mode in _MODES else ""
+        out.append((ents, exec_at + 1, kind, op << 3, _BRANCHES.get(mn), mode))
     return out
 
 
-_KINDS = {"": 0, "rmw": 1, "absx": 2, "absy": 3, "indy": 4, "branch": 5}
+_MODES = {"": 0, "absx": 1, "absy": 2, "indy": 3, "rts": 4}
 
 
 def _native_layouts():
@@ -159,11 +164,12 @@ def _native_layouts():
         (
             list(ents),
             exec_at,
-            _KINDS[kind],
+            kind == "rmw",
+            _MODES[mode],
             base,
             branch and (branch[0], bool(branch[1])),
         )
-        for ents, exec_at, kind, base, branch in Machine.LAYOUTS
+        for ents, exec_at, kind, base, branch, mode in Machine.LAYOUTS
     ]
 
 
@@ -302,6 +308,7 @@ class Machine(Bus):
         self.last_read = 0
         self.vec_addr = self.target = 0
         self.cross = self.taken = False
+        self.op_pc = self.dummy = 0
         self.ents, self.idx, self.base, self.exec_at, self.rmw = (
             BRK_ENTRIES,
             6,
@@ -454,20 +461,29 @@ class Machine(Bus):
         pc = mpu.pc
         obs, self._obs = self._obs, None
         op = self[pc]
-        self.ents, self.exec_at, kind, self.base, branch = Machine.LAYOUTS[op]
-        self.idx, self.rmw = 0, kind == "rmw"
+        self.ents, self.exec_at, kind, self.base, branch, mode = Machine.LAYOUTS[op]
+        self.idx, self.rmw, self.op_pc = 0, kind == "rmw", pc
+        nxt = (pc + 2) & 0xFFFF
         if branch:
             mask, want = branch
             self.taken = bool(mpu.p & mask) == bool(want)
             rel = self[(pc + 1) & 0xFFFF]
-            nxt = (pc + 2) & 0xFFFF
             target = (nxt + rel - (0x100 if rel & 0x80 else 0)) & 0xFFFF
             self.cross = (target ^ nxt) & 0xFF00 != 0
-        elif kind:
+            self.dummy = nxt & 0xFF00 | target & 0xFF
+        elif mode == "rts":
+            sp = mpu.sp
+            lo, hi = self[0x100 | (sp + 1) & 0xFF], self[0x100 | (sp + 2) & 0xFF]
+            self.dummy = hi << 8 | lo
+        elif mode:
             lo = self[(pc + 1) & 0xFFFF]
-            if kind == "indy":
-                lo = self[lo]
-            self.cross = lo + (mpu.x if kind == "absx" else mpu.y) > 0xFF
+            if mode == "indy":
+                lo, hi = self[lo], self[(lo + 1) & 0xFF]
+            else:
+                hi = self[nxt]
+            low = lo + (mpu.x if mode == "absx" else mpu.y)
+            self.cross = low > 0xFF
+            self.dummy = hi << 8 | low & 0xFF
         self._obs = obs
         if not self._check():
             self.ic = _MAX
@@ -478,6 +494,9 @@ class Machine(Bus):
         """``interruptsAndNextOpcode``: start an interrupt or the next opcode."""
         ic = self.ic
         if ic != _MAX and self.cc > ic + 2:
+            obs, self._obs = self._obs, None
+            self.touch(self.mpu.pc)
+            self._obs = obs
             self.ents, self.idx, self.base = BRK_ENTRIES, 0, 0
             self.d1x1, self.ic = True, _MAX
         else:
@@ -512,10 +531,16 @@ class Machine(Bus):
             if not self.cross:
                 self.idx += 1
                 self.cc += 1
+        elif kind in (DP, DA):
+            self.touch(self.op_pc + 1 if kind == DP else self.dummy)
+            if self.idx == self.exec_at:
+                self._exec()
         elif kind == BR:
             if not self.taken:
                 self._fetch()
-            elif not self.cross:
+                return
+            self.touch(self.op_pc + 2)
+            if not self.cross:
                 self.idx += 1
                 self.cc += 1
                 if self.ic >> 3 == self.cc >> 3:
@@ -536,6 +561,7 @@ class Machine(Bus):
             self.on_event(t + 1, "rti")
             self._fetch()
         elif kind == BRK0:
+            self.touch(mpu.pc + (not self.d1x1))
             if not self.d1x1:
                 mpu.pc = (mpu.pc + 2) & 0xFFFF
         elif kind == PUSHPCH:
@@ -580,8 +606,17 @@ class Machine(Bus):
         finally:
             self._obs = None
 
+    def touch(self, addr: int) -> int:
+        """A throw-away CPU read of ``addr``: a bus access with the chips' side effects."""
+        return self[addr & 0xFFFF]
+
+    def _exec(self) -> None:
+        self.mpu.step()
+        if self.rmw and self.pending:
+            self.pending.insert(0, (self.pending[0][0], self.last_read))
+
     def _run(self, limit: int) -> None:
-        sched, mpu = self.sched, self.mpu
+        sched = self.sched
         t = self.t
         while t < limit and not self.jammed:
             t2 = t << 1
@@ -604,9 +639,7 @@ class Machine(Bus):
             self.cc = self.base + self.idx
             if kind == R:
                 if self.idx == self.exec_at:
-                    mpu.step()
-                    if self.rmw and self.pending:
-                        self.pending.insert(0, (self.pending[0][0], self.last_read))
+                    self._exec()
             else:
                 self.t = t
                 self._special(kind, t)
@@ -621,6 +654,7 @@ class Machine(Bus):
         """
         cycle = boot_cycle(self.ntsc) if cycle is None else cycle
         self.sched.run(cycle << 1)
+        self.sched.now = cycle << 1 | PHI2
         self.t = cycle
         self[mm.CPU_DDR], self[mm.CPU_PORT] = mm.DDR_DEFAULT, mm.BANK_DEFAULT
         mpu = self.mpu

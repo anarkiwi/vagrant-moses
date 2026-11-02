@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use jennings_core::AddrSet;
 use moses_core::calls::{Calls, HALT_CYCLES, HALT_JAM};
 use moses_core::lines::NAMES;
-use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
+use moses_core::machine::{DA, M_RTS};
 use moses_core::reu::{geometry, REGS, SIZES};
 use moses_core::sys::RAM;
 use moses_core::trace::{Facts, Scan, Tracer};
@@ -248,16 +248,16 @@ fn image(data: &[u8]) -> PyResult<Box<[u8; 0x10000]>> {
 }
 
 fn layout(item: &Bound<'_, PyAny>) -> PyResult<Layout> {
-    let (ents, exec_at, kind, base, branch): (Vec<u8>, i32, u8, i32, Option<(u8, bool)>) =
-        item.extract()?;
-    let kind = match kind {
-        K_NONE | K_RMW | K_ABSX | K_ABSY | K_INDY | K_BRANCH => kind,
-        _ => return Err(PyValueError::new_err("unknown layout kind")),
-    };
+    type Raw = (Vec<u8>, i32, bool, u8, i32, Option<(u8, bool)>);
+    let (ents, exec_at, rmw, mode, base, branch): Raw = item.extract()?;
+    if mode > M_RTS || ents.iter().any(|&k| k > DA) {
+        return Err(PyValueError::new_err("unknown layout mode or cycle kind"));
+    }
     Ok(Layout {
         ents,
         exec_at,
-        kind,
+        rmw,
+        mode,
         base,
         branch,
     })

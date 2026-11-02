@@ -226,3 +226,4 @@ __marimo__/
 core
 core.[0-9]*
 .reu-cache/
+.harte-cache/
