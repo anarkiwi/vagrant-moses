@@ -132,24 +132,23 @@ class Recorder:
 class Tracer:
     """The armed ``recorder``'s trace: lift facts of the call phase's instructions and one
     record per phase. ``table`` holds 256 little-endian ``u16`` per opcode (``docs/native.md``);
-    calls return to ``sentinel``; the SID window ``sid`` (``(lo, hi)``) is answered natively,
-    registers from ``image``."""
+    calls return to ``sentinel``; the CPU and DMA I/O accesses at ``window`` (``(lo, hi)``)
+    are logged as the machine answers them."""
 
     NONE, INIT, CALL = range(3)
 
-    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
-    def __init__(self, recorder, table, sentinel, sid, image):
+    def __init__(self, recorder, table, sentinel, window):
         if not TRACE:
             raise ImportError("the trace needs vagrant_moses._core with smc_trace")
         self.m = recorder.m
-        self.m.smc_trace(bytes(table), sentinel, sid[0], sid[1], bytes(image))
+        self.m.smc_trace(bytes(table), sentinel, window[0], window[1])
 
     def phase(self, phase: int, sp0: int = 0) -> None:
         """Enter ``phase`` (:attr:`NONE`, :attr:`INIT`, :attr:`CALL`), a call entered at ``sp0``."""
         self.m.smc_trace_phase(phase, sp0)
 
     def snap(self) -> Tuple[list, bytes, bytes]:
-        """Close the phase: ``(log, idx, vals)``, its ``(addr, value, write)`` SID accesses in
+        """Close the phase: ``(log, idx, vals)``, its ``(addr, value, write)`` I/O accesses in
         order and the RAM bytes changed since the previous snap (``idx`` little-endian
         ``u16``)."""
         return self.m.smc_trace_snap()

@@ -16,6 +16,7 @@ use jennings_core::AddrSet;
 use moses_core::lines::NAMES;
 use moses_core::machine::{K_ABSX, K_ABSY, K_BRANCH, K_INDY, K_NONE, K_RMW};
 use moses_core::reu::{geometry, REGS, SIZES};
+use moses_core::sys::RAM;
 use moses_core::trace::{Facts, Scan, Tracer};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
@@ -103,6 +104,7 @@ fn watch_all(py: Python<'_>) -> PyResult<&Py<WatchAll>> {
 struct PyHost<'a> {
     devs: &'a [HostDev],
     sink: Option<&'a Py<PyAny>>,
+    on_io: Option<&'a Py<PyAny>>,
     hooks: Hooks,
     me: Option<Py<Machine>>,
     active: &'a AtomicPtr<Core>,
@@ -184,6 +186,15 @@ impl Host for PyHost<'_> {
         }
     }
 
+    fn io(&mut self, addr: u16, value: u8, write: bool) {
+        let (Some(cb), None) = (self.on_io, &self.err) else {
+            return;
+        };
+        if let Err(e) = Python::attach(|py| cb.call1(py, (addr, value, write)).map(drop)) {
+            self.fail(e);
+        }
+    }
+
     fn trap(&mut self, core: &mut Core) -> bool {
         let cb = Python::attach(|py| self.hooks.trap.as_ref().map(|c| c.clone_ref(py)));
         self.hook(core, cb)
@@ -259,6 +270,7 @@ pub struct Machine {
     logged: Vec<Py<NativeSid>>,
     sids: Py<PyDict>,
     sink: Option<Py<PyAny>>,
+    on_io: Option<Py<PyAny>>,
     hooks: UnsafeCell<Hooks>,
     owner: Owner,
     active: AtomicPtr<Core>,
@@ -312,6 +324,7 @@ impl Machine {
         PyHost {
             devs: &self.devs,
             sink: self.sink.as_ref(),
+            on_io: self.on_io.as_ref(),
             hooks: Hooks::default(),
             me: None,
             active: &self.active,
@@ -362,7 +375,7 @@ impl Machine {
 #[pymethods]
 impl Machine {
     #[new]
-    #[pyo3(signature = (ntsc, sids, cia_new, on_event, layouts, ram, roms, lines, cycles_per_line, reu=None))]
+    #[pyo3(signature = (ntsc, sids, cia_new, on_event, layouts, ram, roms, lines, cycles_per_line, reu=None, on_io=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         ntsc: bool,
@@ -375,6 +388,7 @@ impl Machine {
         lines: i32,
         cycles_per_line: i32,
         reu: Option<u32>,
+        on_io: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
         if let Some(kb) = reu.filter(|&kb| geometry(kb).is_none()) {
             return Err(PyValueError::new_err(format!(
@@ -424,6 +438,7 @@ impl Machine {
             logged,
             sids: sids.unbind(),
             sink: on_event,
+            on_io,
             hooks: UnsafeCell::new(Hooks::default()),
             owner: Owner::default(),
             active: AtomicPtr::new(ptr::null_mut()),
@@ -639,7 +654,7 @@ impl Machine {
     fn io_read(&self, addr: i64) -> PyResult<u8> {
         let core = self.core()?;
         let mut host = self.host();
-        let v = core.s.io_read(&mut host, (addr & 0xFFFF) as u16);
+        let v = core.s.io_get(&mut host, (addr & 0xFFFF) as u16);
         core.s.flush(&mut host);
         host.err.map_or(Ok(v), Err)
     }
@@ -649,7 +664,7 @@ impl Machine {
         let core = self.core()?;
         let mut host = self.host();
         core.s
-            .io_write(&mut host, (addr & 0xFFFF) as u16, byte(value)?);
+            .io_put(&mut host, (addr & 0xFFFF) as u16, byte(value)?);
         core.s.flush(&mut host);
         host.err.map_or(Ok(()), Err)
     }
@@ -864,18 +879,12 @@ impl Machine {
     }
 
     /// Arm the recorder's trace: per-opcode `table` (256 little-endian `u16`), calls returning
-    /// to `sentinel`, the SID window `lo..hi` with registers from `image`.
-    fn smc_trace(
-        &self,
-        table: &Bound<'_, PyAny>,
-        sentinel: u16,
-        lo: u16,
-        hi: u32,
-        image: &Bound<'_, PyAny>,
-    ) -> PyResult<()> {
+    /// to `sentinel`, the I/O accesses at `lo..hi` logged, RAM changes from now.
+    fn smc_trace(&self, table: &Bound<'_, PyAny>, sentinel: u16, lo: u16, hi: u32) -> PyResult<()> {
         let t = table16(table)?;
-        let image = self::image(&octets(image)?)?;
-        self.rec(self.core()?)?.tracer = Some(Box::new(Tracer::new(t, sentinel, lo, hi, &image)));
+        let core = self.core()?;
+        let tr = Tracer::new(t, sentinel, lo, hi, &core.s.img[RAM]);
+        self.rec(core)?.tracer = Some(Box::new(tr));
         Ok(())
     }
 
@@ -911,7 +920,7 @@ impl Machine {
         Ok(())
     }
 
-    /// Close the phase: `(log, idx, vals)`, the SID accesses `(addr, value, write)` in order
+    /// Close the phase: `(log, idx, vals)`, the window's I/O accesses `(addr, value, write)` in order
     /// and the RAM changed since the previous record (`idx` little-endian `u16`).
     #[allow(clippy::type_complexity)]
     fn smc_trace_snap<'py>(

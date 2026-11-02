@@ -210,7 +210,7 @@ impl Core {
 
     /// `machine[addr]` from the host.
     pub fn peek<H: Host>(&mut self, h: &mut H, addr: u16) -> u8 {
-        let v = self.s.rd(h, addr);
+        let v = self.s.look(h, addr);
         self.s.flush(h);
         v
     }
@@ -245,7 +245,7 @@ impl Core {
             }
         }
         let pc = self.cpu.pc;
-        let op = self.s.rd(h, pc) as usize;
+        let op = self.s.look(h, pc) as usize;
         let (kind, base, branch) = {
             let l = &self.layouts[op];
             (l.kind, l.base, l.branch)
@@ -258,14 +258,14 @@ impl Core {
         self.s.rmw = self.rmw;
         if let Some((mask, want)) = branch {
             self.taken = (self.cpu.p() & mask != 0) == want;
-            let rel = self.s.rd(h, pc.wrapping_add(1));
+            let rel = self.s.look(h, pc.wrapping_add(1));
             let nxt = pc.wrapping_add(2);
             let target = nxt.wrapping_add(rel as i8 as u16);
             self.cross = (target ^ nxt) & 0xFF00 != 0;
         } else if kind != K_NONE {
-            let mut lo = self.s.rd(h, pc.wrapping_add(1));
+            let mut lo = self.s.look(h, pc.wrapping_add(1));
             if kind == K_INDY {
-                lo = self.s.rd(h, lo as u16);
+                lo = self.s.look(h, lo as u16);
             }
             let idx = if kind == K_ABSX {
                 self.cpu.x

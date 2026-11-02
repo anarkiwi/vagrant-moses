@@ -1,9 +1,9 @@
 //! The recorder's trace: per-instruction lift facts of the call phase and per-phase records
-//! (the SID window's accesses in order and the RAM change since the previous record).
+//! (the window's I/O accesses in order and the RAM change since the previous record).
 //!
-//! Fed at the recorder's decodes and at bus accesses to the SID window, which it answers
-//! itself: a register reads the last value written there, else the armed image's byte. Its
-//! state is fixed-size bitsets and tables except the edge set, which grows only by new edges.
+//! Fed at the recorder's decodes and at the CPU and DMA accesses the machine makes to its I/O
+//! page, which it observes without answering. Its state is fixed-size bitsets and tables
+//! except the edge set, which grows only by new edges.
 
 use crate::smc::{peek, view, V_IO};
 use crate::sys::{Sys, RAM};
@@ -32,7 +32,6 @@ pub const S_X: u16 = 2;
 pub const S_Y: u16 = 3;
 pub const S_AX: u16 = 4;
 
-const SID_MIRROR: std::ops::RangeInclusive<u16> = 0xD400..=0xD7FF;
 /// Height bits per pc: `sp - sp0` in `-255..=255`, indexed by its low 9 bits.
 const HWORDS: usize = 8;
 /// Value bits per address.
@@ -47,7 +46,7 @@ struct Stores {
     stored: Option<u8>,
 }
 
-/// One phase's record: the SID log and the RAM bytes that changed since the previous one.
+/// One phase's record: the I/O log and the RAM bytes that changed since the previous one.
 pub struct Record {
     pub log: Vec<(u16, u8, bool)>,
     pub idx: Vec<u16>,
@@ -186,7 +185,6 @@ pub struct Tracer {
     sentinel: u16,
     lo: u16,
     hi: u32,
-    regs: Box<[u8; 0x10000]>,
     base: Box<[u8; 0x10000]>,
     pub phase: u8,
     pub sp0: u8,
@@ -203,23 +201,15 @@ pub struct Tracer {
 }
 
 impl Tracer {
-    /// A trace whose SID window is the 32-byte devices at `lo..hi` step `$20` (with the
-    /// `$D400` device answering its `$D400-$D7FF` mirrors), registers from `image`; calls
-    /// return to `sentinel`.
-    pub fn new(
-        table: [u16; 256],
-        sentinel: u16,
-        lo: u16,
-        hi: u32,
-        image: &[u8; 0x10000],
-    ) -> Tracer {
+    /// A trace logging the I/O accesses at `lo..hi`, RAM changes against `ram`; calls return
+    /// to `sentinel`.
+    pub fn new(table: [u16; 256], sentinel: u16, lo: u16, hi: u32, ram: &[u8; 0x10000]) -> Tracer {
         Tracer {
             table,
             sentinel,
             lo,
             hi,
-            regs: Box::new(*image),
-            base: Box::new(*image),
+            base: Box::new(*ram),
             phase: PH_NONE,
             sp0: 0,
             starts: vec![0; 0x10000 / 64].into_boxed_slice(),
@@ -235,47 +225,18 @@ impl Tracer {
         }
     }
 
-    fn device(&self, base: u16) -> bool {
-        base >= self.lo && (base as u32) < self.hi && (base - self.lo) & 0x1F == 0
+    fn window(&self, addr: u16) -> bool {
+        addr >= self.lo && (addr as u32) < self.hi
     }
 
-    /// The register `addr` answers as, when a SID device of the window holds it.
-    fn reg(&self, addr: u16) -> Option<u16> {
-        let base = addr & 0xFFE0;
-        if self.device(base) {
-            Some(addr)
-        } else if SID_MIRROR.contains(&addr) && self.device(*SID_MIRROR.start()) {
-            Some(SID_MIRROR.start() | addr & 0x1F)
-        } else {
-            None
-        }
-    }
-
-    fn access(&mut self, addr: u16, value: u8, write: bool) {
-        if self.phase != PH_NONE {
+    /// An I/O access the machine made: `value` read from or written to `addr`.
+    pub fn access(&mut self, addr: u16, value: u8, write: bool) {
+        if self.phase != PH_NONE && self.window(addr) {
             self.log.push((addr, value, write));
             if write && self.phase == PH_CALL {
                 self.stored(addr, value);
             }
         }
-    }
-
-    /// A CPU read of the I/O byte `addr`, when the window answers it.
-    pub fn sid_read(&mut self, addr: u16) -> Option<u8> {
-        let r = self.reg(addr)?;
-        let v = self.regs[r as usize];
-        self.access(r, v, false);
-        Some(v)
-    }
-
-    /// A write of the I/O byte `addr`; true when the window took it.
-    pub fn sid_write(&mut self, addr: u16, value: u8) -> bool {
-        let Some(r) = self.reg(addr) else {
-            return false;
-        };
-        self.regs[r as usize] = value;
-        self.access(r, value, true);
-        true
     }
 
     fn stored(&mut self, addr: u16, value: u8) {
@@ -303,7 +264,7 @@ impl Tracer {
     }
 
     /// Value the previous instruction's stores from RAM after it: a byte the CPU does not see
-    /// as I/O, else (outside the SID window) the register a plain store stored.
+    /// as I/O, else (outside the window) the register a plain store stored.
     fn settle(&mut self, s: &Sys) {
         let Some(st) = self.pend.take() else {
             return;
@@ -311,7 +272,7 @@ impl Tracer {
         for &addr in &st.addrs[..st.n] {
             if addr < 2 || view(st.bits, addr) != V_IO {
                 self.stored(addr, s.img[RAM][addr as usize]);
-            } else if !(addr >= self.lo && (addr as u32) < self.hi) {
+            } else if !self.window(addr) {
                 if let Some(v) = st.stored {
                     self.stored(addr, v);
                 }
@@ -446,41 +407,26 @@ mod tests {
     use super::*;
 
     fn tracer(lo: u16, hi: u32) -> Tracer {
-        let mut image = Box::new([0u8; 0x10000]);
-        image[0xD418] = 0x0F;
-        Tracer::new([0; 256], 0xCFF0, lo, hi, &image)
+        Tracer::new([0; 256], 0xCFF0, lo, hi, &[0; 0x10000])
     }
 
     #[test]
-    fn the_window_answers_its_devices_and_the_d400_mirrors() {
-        let mut t = tracer(0xD400, 0xD420);
+    fn traced_phases_log_the_window_raw_and_calls_store_its_writes() {
+        let mut t = tracer(0xD400, 0xD800);
+        t.access(0xD400, 1, true);
+        t.phase = PH_INIT;
+        t.access(0xD401, 2, true);
+        assert!(t.facts().writes.is_empty());
         t.phase = PH_CALL;
-        assert_eq!(t.sid_read(0xD418), Some(0x0F));
-        assert!(t.sid_write(0xD5F8, 0x1F));
-        assert_eq!(t.sid_read(0xD418), Some(0x1F));
-        assert_eq!(t.sid_read(0xDE00), None);
-        assert!(!t.sid_write(0xDE00, 1));
+        t.access(0xD5F8, 0x1F, true);
+        t.access(0xD3FF, 3, false);
+        t.access(0xD800, 4, true);
+        t.access(0xD7FF, 5, false);
         assert_eq!(
             t.log,
-            [
-                (0xD418, 0x0F, false),
-                (0xD418, 0x1F, true),
-                (0xD418, 0x1F, false)
-            ]
+            [(0xD401, 2, true), (0xD5F8, 0x1F, true), (0xD7FF, 5, false)]
         );
-        assert_eq!(t.facts().writes, [(0xD418, vec![0x1F])]);
-        let unaligned = tracer(0xD401, 0xD800);
-        assert_eq!(unaligned.reg(0xD418), None);
-    }
-
-    #[test]
-    fn only_traced_phases_log() {
-        let mut t = tracer(0xD400, 0xD800);
-        t.sid_write(0xD400, 1);
-        t.phase = PH_INIT;
-        t.sid_write(0xD401, 2);
-        assert_eq!(t.log, [(0xD401, 2, true)]);
-        assert!(t.facts().writes.is_empty());
+        assert_eq!(t.facts().writes, [(0xD5F8, vec![0x1F])]);
     }
 
     #[test]
