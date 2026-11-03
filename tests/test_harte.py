@@ -9,21 +9,18 @@ pytest.importorskip("jennings")
 import harte  # pylint: disable=wrong-import-position
 from vagrant_moses import machine as vm  # pylint: disable=wrong-import-position
 
-CASES = 100
-
 
 def _cached(op):
-    if not (harte.CACHE / harte.SHA[:12] / f"{op:02x}-{CASES}.json.gz").exists():
+    if not (harte.CACHE / harte.SHA[:12] / f"{op:02x}.json.gz").exists():
         pytest.skip("no cached cases: run tools/harte_cycles.py")
-    return harte.cases(op, CASES)
+    return harte.cases(op, harte.CYCLE_CASES)
 
 
 @pytest.mark.parametrize("op", harte.OPS, ids=lambda op: f"{op:02x}")
 def test_bus_cycles_match_single_step_tests(op):
-    """Every case's cycles, bar the page-crossing writes of jennings' SH* opcodes."""
+    """Every case's cycles."""
     for case in _cached(op):
-        if not harte.unstable(op, case):
-            assert harte.check(case) == [], case
+        assert harte.check(case) == [], case
 
 
 def test_a_misplaced_cycle_is_reported():

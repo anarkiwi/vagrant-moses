@@ -174,7 +174,7 @@ def _native_layouts():
 
 
 def _rom_images(roms: Optional[Dict[int, bytes]] = None):
-    """BASIC, CHARGEN and KERNAL as 64 KiB images, as :class:`~vagrant_moses.bus.Bus` keeps them;
+    """BASIC, CHARGEN and KERNAL as address-space images :class:`~vagrant_moses.bus.Bus` keeps;
     ``roms`` (base -> bytes) overrides the ROM-less set per ROM."""
     roms = {**rom_less(), **(roms or {})}
     images = []
@@ -318,6 +318,7 @@ class Machine(Bus):
         )
         self.t, self.cc, self.jammed = 0, 6, False
         self.mpu = mpu_cls(memory=self)
+        self.mpu.bus_dummies = False
         self.cia1.reset()
         self.cia2.reset()
         self.vic.reset()

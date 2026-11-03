@@ -22,7 +22,7 @@ _PORT = (mm.CPU_DDR, mm.CPU_PORT)
 class NativeBus(Bus):
     """:class:`Bus` banking state over a jennings ``NativeMemory``; also its facade.
 
-    ``ram`` is a zero-copy view of the native memory's 64 KiB RAM, so ``bus.ram[a]``,
+    ``ram`` is a zero-copy view of the native memory's $0000-$FFFF RAM, so ``bus.ram[a]``,
     ``mem[a]`` and the executing CPU always agree; when the native memory shares the
     caller's buffer, that buffer is the same memory. ROM and I/O
     banking are pushed into the native page table whenever ``$00``/``$01`` change.
@@ -127,10 +127,12 @@ def flat_mpu(
     ``mem._subject`` is the :class:`Bus` (``bits``, ``io``, ``ram``).
     ``$D011``/``$D012`` read the beam at the cycle counter on a PAL or NTSC frame.
 
+    Both engines present an instruction's data accesses only, without the NMOS dummy ones.
+
     ``native`` selects the engine: ``None`` follows ``jennings.memory.NATIVE``,
     ``False`` forces the pure-Python one and ``True`` requires the native core.
     ``ram`` is the live RAM on both engines: the native core runs directly on it,
-    without copying, when it is a writable contiguous 64 KiB buffer (a ``bytearray``).
+    without copying, when it is a writable contiguous address-space buffer (a ``bytearray``).
     Any other buffer (``bytes``, another length) is copied in once and the native
     memory owns the RAM afterwards: reach it through ``mem[...]`` or ``mem.ram``.
     """
@@ -158,6 +160,7 @@ def flat_mpu(
     bus = Bus(ram, roms)
     mem = ObservableMemory(subject=bus)
     mpu = MPU(memory=mem)
+    mpu.bus_dummies = False
 
     def raster(addr):
         if not bus.io:
