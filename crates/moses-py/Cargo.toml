@@ -12,5 +12,5 @@ path = "src/lib.rs"
 
 [dependencies]
 moses-core = { path = "../moses-core" }
-jennings-core = { git = "https://github.com/anarkiwi/jennings", rev = "ab35630139ed974b46ddb820a73ccfbddbfda0ba" }
+jennings-core = { git = "https://github.com/anarkiwi/jennings", rev = "37ad0f440799ed94a9b7fbdcd5e01a150c66636e" }
 pyo3 = { version = "0.30", features = ["abi3-py312"] }
