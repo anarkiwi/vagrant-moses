@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vagrant-moses"
-version = "0.14.0"
+version = "0.15.0"
 description = "Standalone C64 machine model: memory map, banked bus and ROMs, VIC-II and CIAs over a two-phase scheduler, a cycle-exact 6510 machine, KERNAL traps, IRQ dispatch, and native d64/d71/d81/t64 media extraction"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -29,11 +29,15 @@ cli = ["tqdm>=4"]
 cpu = ["jennings>=0.10.0"]
 # vagrant_moses.sidorder judges envelopes with libresidfp.
 sidorder = ["numpy>=1.23", "pylibresidfp>=0.5.0", "tqdm"]
+# vagrant_moses.cgen lifts C64 programs to C with deity-informant.
+cgen = ["deity-informant>=0.10.0"]
 dev = [
     "tqdm>=4",
     "jennings>=0.10.0",
     "numpy>=1.23",
     "pylibresidfp>=0.5.0",
+    "deity-informant>=0.10.0",
+    "pyelftools",
     "black>=24",
     "pylint>=3",
     "pytest>=7",
