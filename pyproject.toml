@@ -37,6 +37,7 @@ dev = [
     "numpy>=1.23",
     "pylibresidfp>=0.5.0",
     "deity-informant>=0.10.0",
+    "pyelftools",
     "black>=24",
     "pylint>=3",
     "pytest>=7",
