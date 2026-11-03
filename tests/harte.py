@@ -19,35 +19,47 @@ from vagrant_moses.machine import Machine
 
 SHA = "2f6980a2d95757486c7bee24355c360e40e2a224"
 URL = "https://raw.githubusercontent.com/SingleStepTests/65x02/{sha}/6502/v1/{op:02x}.json"
-CACHE = Path(__file__).resolve().parent.parent / ".harte-cache"
+CACHE = Path(__file__).resolve().parent.parent / ".harte-cache" / "v2"
 OPS = [op for op in range(256) if OPCODES[op][0] != "JAM"]
 START = 1000
 UNSTABLE = frozenset((0x93, 0x9B, 0x9C, 0x9E, 0x9F))
+# ADC, SBC and ARR, and the opcodes that run them (SBC #imm $EB, RRA, ISC): all their cases.
+DECIMAL = frozenset(
+    op for op in OPS if OPCODES[op][0] in ("ADC", "SBC", "ARR", "RRA", "ISC")
+)
+CYCLE_CASES = 100
+
+
+def want(op: int) -> int:
+    """How many cases of ``op`` are fetched: every one for the decimal opcodes."""
+    return 10_000 if op in DECIMAL else CYCLE_CASES
 
 
 def _trim(case: dict) -> dict:
-    ini = case["initial"]
+    ini, fin = case["initial"], case["final"]
     return {
         "regs": [ini[k] for k in ("pc", "s", "a", "x", "y", "p")],
         "ram": ini["ram"],
-        "final_pc": case["final"]["pc"],
+        "final_pc": fin["pc"],
+        "final": [fin[k] for k in ("pc", "s", "a", "x", "y", "p")],
+        "final_ram": fin["ram"],
         "cycles": [[addr, kind[0]] for addr, _, kind in case["cycles"]],
     }
 
 
-def cases(op: int, count: int, cache: Path = CACHE) -> List[dict]:
-    """The first ``count`` cases of ``op``, fetched once and cached trimmed."""
-    path = cache / SHA[:12] / f"{op:02x}-{count}.json.gz"
+def cases(op: int, count: int = 0, cache: Path = CACHE) -> List[dict]:
+    """The first ``count`` cases of ``op`` (all fetched: see :func:`want`), cached trimmed."""
+    path = cache / SHA[:12] / f"{op:02x}.json.gz"
     if not path.exists():
         with urllib.request.urlopen(URL.format(sha=SHA, op=op), timeout=120) as resp:
             data = json.load(resp)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         with gzip.open(tmp, "wt") as out:
-            json.dump([_trim(c) for c in data[:count]], out)
+            json.dump([_trim(c) for c in data[: want(op)]], out)
         tmp.replace(path)
     with gzip.open(path, "rt") as src:
-        return json.load(src)
+        return json.load(src)[: count or None]
 
 
 class Probe(Machine):

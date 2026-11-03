@@ -10,8 +10,8 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "jennings-core"
-version = "0.5.1"
-source = "git+https://github.com/anarkiwi/jennings?tag=v0.5.1#76d8a361bbf4a1ccd12201283b547ceca45a2f4b"
+version = "0.10.0"
+source = "git+https://github.com/anarkiwi/jennings?rev=ab35630139ed974b46ddb820a73ccfbddbfda0ba#ab35630139ed974b46ddb820a73ccfbddbfda0ba"
 
 [[package]]
 name = "libc"
@@ -21,14 +21,14 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "moses-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jennings-core",
 ]
 
 [[package]]
 name = "moses-py"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "jennings-core",
  "moses-core",

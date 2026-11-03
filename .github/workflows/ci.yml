@@ -32,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .harte-cache
-          key: harte-2f6980a2d957-100
+          key: harte-2f6980a2d957-v2
       - name: Bus cycles against SingleStepTests 6502
         run: python tools/harte_cycles.py --cases 100
       - name: pytest + coverage (> 85%)

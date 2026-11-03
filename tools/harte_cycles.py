@@ -23,6 +23,7 @@ from jennings.opcodes import OPCODES  # pylint: disable=wrong-import-position
 def _one(args):
     op, count = args
     found = Counter()
+    harte.cases(op)
     for case in harte.cases(op, count):
         if not harte.unstable(op, case):
             found.update(harte.check(case))

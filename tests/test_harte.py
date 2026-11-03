@@ -9,13 +9,11 @@ pytest.importorskip("jennings")
 import harte  # pylint: disable=wrong-import-position
 from vagrant_moses import machine as vm  # pylint: disable=wrong-import-position
 
-CASES = 100
-
 
 def _cached(op):
-    if not (harte.CACHE / harte.SHA[:12] / f"{op:02x}-{CASES}.json.gz").exists():
+    if not (harte.CACHE / harte.SHA[:12] / f"{op:02x}.json.gz").exists():
         pytest.skip("no cached cases: run tools/harte_cycles.py")
-    return harte.cases(op, CASES)
+    return harte.cases(op, harte.CYCLE_CASES)
 
 
 @pytest.mark.parametrize("op", harte.OPS, ids=lambda op: f"{op:02x}")
