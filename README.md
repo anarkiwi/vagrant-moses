@@ -16,7 +16,7 @@ envelopes through the optional pylibresidfp (the `sidorder` extra). SID-file kno
 ## Install
 
 ```bash
-pip install -e ".[cpu]"            # add ".[sidorder]" for vagrant_moses.sidorder
+pip install -e ".[cpu]"            # add ".[sidorder]" / ".[cgen]" for sidorder / cgen
 ```
 
 ## Use
@@ -56,6 +56,7 @@ vagrant-moses media extract dl/ -o prg/                 # prints sha256 size $lo
 - [The machine model: memory map, bus, ROMs, chips, machine, REU, KERNAL and IRQ dispatch](docs/c64.md)
 - [The native machine: Rust port, hooks, the SMC recorder, native call queue and interrupt frames with budgets, threading, verification](docs/native.md)
 - [SID write order and hard restart: event patterns, the order cover, the settled hard restart](docs/sidorder.md)
+- [C64 programs as C: the I/O model and host over deity-informant's 6502 → C translator](docs/cgen.md)
 - [Release media: nested containers, disk geometries, tapes, and the CLI](docs/media.md)
 
 ## Develop
