@@ -115,6 +115,7 @@ class KernalHost:
                     "KernalHost needs a 6510 core: pip install vagrant-moses[cpu]"
                 ) from exc
             mpu = MPU(memory=self.bus)
+            mpu.bus_dummies = False
         self.mpu = mpu
         self.output = bytearray()
         self.keys: deque = deque()

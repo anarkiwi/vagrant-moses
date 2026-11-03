@@ -15,7 +15,7 @@ from vagrant_moses import machine as vm  # pylint: disable=wrong-import-position
 
 START = 1000
 FLAGS = 0xCF
-# ANE and LXA take a chip-dependent constant; SHA, SHX, SHY and TAS are `harte.UNSTABLE`.
+# ANE and LXA take a chip-dependent constant.
 MAGIC = frozenset((0x8B, 0xAB))
 BACKENDS = ["python"] + (["native"] if vm.NATIVE else [])
 
@@ -51,11 +51,11 @@ def run(backend, case):
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("op", harte.OPS, ids=lambda op: f"{op:02x}")
 def test_state_matches_single_step_tests(backend, op):
-    """Every case's registers, flags and RAM, bar the chip-dependent opcodes' unstable ones."""
+    """Every case's registers, flags and RAM, bar the chip-dependent opcodes."""
     if op in MAGIC:
         pytest.skip("magic constant is chip-dependent")
     for case in _cached(op):
-        if _on_ports(case) or harte.unstable(op, case):
+        if _on_ports(case):
             continue
         regs, ram = run(backend, case)
         want = case["final"][:5] + [case["final"][5] & FLAGS]

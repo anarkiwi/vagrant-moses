@@ -8,4 +8,4 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-jennings-core = { git = "https://github.com/anarkiwi/jennings", rev = "37ad0f440799ed94a9b7fbdcd5e01a150c66636e" }
+jennings-core = { git = "https://github.com/anarkiwi/jennings", tag = "v0.10.0" }

@@ -20,7 +20,7 @@ backend="native"|"python")` picks one, native when `_core` imports and the class
 
 `moses-core` runs the 6510 on `jennings-core` (`Cpu::step` over a `Bus` implementation);
 it holds no CPU semantics. `jennings-core` is not on crates.io, so it is a git dependency
-pinned in both crates' `Cargo.toml` to a jennings commit (a release tag when one exists for it).
+pinned in both crates' `Cargo.toml` to a jennings release tag.
 
 ## Semantics
 

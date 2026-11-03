@@ -22,7 +22,6 @@ URL = "https://raw.githubusercontent.com/SingleStepTests/65x02/{sha}/6502/v1/{op
 CACHE = Path(__file__).resolve().parent.parent / ".harte-cache" / "v2"
 OPS = [op for op in range(256) if OPCODES[op][0] != "JAM"]
 START = 1000
-UNSTABLE = frozenset((0x93, 0x9B, 0x9C, 0x9E, 0x9F))
 # ADC, SBC and ARR, and the opcodes that run them (SBC #imm $EB, RRA, ISC): all their cases.
 DECIMAL = frozenset(
     op for op in OPS if OPCODES[op][0] in ("ADC", "SBC", "ARR", "RRA", "ISC")
@@ -101,18 +100,6 @@ class Probe(Machine):
     def _decode(self) -> None:
         self.decodes.append((self._cycle(), self.mpu.pc))
         super()._decode()
-
-
-def unstable(op: int, case: dict) -> bool:
-    """A page-crossing SHA/SHX/SHY/TAS case, which jennings writes unANDed."""
-    if op not in UNSTABLE:
-        return False
-    pc, _, _, x, y, _ = case["regs"]
-    ram = dict(case["ram"])
-    mode = OPCODES[op][1]
-    operand = ram[(pc + 1) & 0xFFFF]
-    lo = ram[operand] if mode == "indy" else operand
-    return lo + (x if mode == "absx" else y) > 0xFF
 
 
 def check(case: dict) -> List[str]:

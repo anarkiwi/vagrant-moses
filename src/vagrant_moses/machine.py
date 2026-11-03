@@ -318,6 +318,7 @@ class Machine(Bus):
         )
         self.t, self.cc, self.jammed = 0, 6, False
         self.mpu = mpu_cls(memory=self)
+        self.mpu.bus_dummies = False
         self.cia1.reset()
         self.cia2.reset()
         self.vic.reset()

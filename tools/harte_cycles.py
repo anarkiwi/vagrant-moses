@@ -25,8 +25,7 @@ def _one(args):
     found = Counter()
     harte.cases(op)
     for case in harte.cases(op, count):
-        if not harte.unstable(op, case):
-            found.update(harte.check(case))
+        found.update(harte.check(case))
     return op, found
 
 

@@ -18,10 +18,9 @@ def _cached(op):
 
 @pytest.mark.parametrize("op", harte.OPS, ids=lambda op: f"{op:02x}")
 def test_bus_cycles_match_single_step_tests(op):
-    """Every case's cycles, bar the page-crossing writes of jennings' SH* opcodes."""
+    """Every case's cycles."""
     for case in _cached(op):
-        if not harte.unstable(op, case):
-            assert harte.check(case) == [], case
+        assert harte.check(case) == [], case
 
 
 def test_a_misplaced_cycle_is_reported():

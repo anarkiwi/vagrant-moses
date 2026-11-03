@@ -127,6 +127,8 @@ def flat_mpu(
     ``mem._subject`` is the :class:`Bus` (``bits``, ``io``, ``ram``).
     ``$D011``/``$D012`` read the beam at the cycle counter on a PAL or NTSC frame.
 
+    Both engines present an instruction's data accesses only, without the NMOS dummy ones.
+
     ``native`` selects the engine: ``None`` follows ``jennings.memory.NATIVE``,
     ``False`` forces the pure-Python one and ``True`` requires the native core.
     ``ram`` is the live RAM on both engines: the native core runs directly on it,
@@ -158,6 +160,7 @@ def flat_mpu(
     bus = Bus(ram, roms)
     mem = ObservableMemory(subject=bus)
     mpu = MPU(memory=mem)
+    mpu.bus_dummies = False
 
     def raster(addr):
         if not bus.io:
