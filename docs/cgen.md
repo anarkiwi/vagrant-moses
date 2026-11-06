@@ -28,20 +28,29 @@ subtunes) are the caller's concern: it passes the image and the entry points.
 | | Addresses | Meaning |
 |---|---|---|
 | `VOLATILE` | `$D000-$DFFF` | every write is `io_write`, kept in order; no I/O byte is a data region |
-| `SENSITIVE` | the mirrors of `SENSITIVE_REGISTERS` | reads kept as `io_read`, in order, even when the value is unused |
+| `SENSITIVE` | the I/O addresses whose read changes device state | reads kept as `io_read`, in order, even when the value is unused |
 
-`SENSITIVE_REGISTERS` are the reads that have effects or see the machine run: VIC-II
-`$D011`/`$D012` (raster), `$D013`/`$D014` (light pen), `$D019` (IRQ status), `$D01E`/`$D01F`
-(collisions, cleared on read); SID `$D419-$D41C` (paddles, OSC3, ENV3); each CIA's ports
-(`$x0`, `$x1`), timers (`$x4-$x7`), TOD (`$x8-$xB`) and ICR (`$xD`, cleared on read).
-`SENSITIVE` is every address of the I/O window that `memmap.io_register` decodes to one of
-them: the VIC-II repeats every `$40` to `$D3FF`, the SID every `$20` to `$D7FF`, each CIA
-every `$10` over its page. Other I/O reads (write-only SID registers, colour RAM, control
-registers) may be dropped by the lift when their value is unused.
+A read whose value is unused is observable only through a side effect. `SENSITIVE_REGISTERS`
+are the registers whose read changes device state: VIC-II `$D01E`/`$D01F` (collisions,
+cleared with their IRQ sources); each CIA's ICR (`$xD`: flags cleared, IRQ/NMI released),
+TOD tenths (`$x8`, releases the TOD read latch) and hours (`$xB`, sets it); CIA 2's port B
+(`$DD01`: pulses PC2 on the user port; CIA 1's PC is not connected). Raster, light pen,
+`$D019`, paddles, OSC3, ENV3, the CIA ports, timers, TOD seconds and minutes and SDR return
+values that vary, but reading them changes nothing.
 
-A raster poll or a SID model probe in an init routine (`LDA $D012 / CMP #$FC / BNE`, `LDA
-$D41B`) and CIA timer setup therefore lift to real accesses: the C waits on the same
-hardware the original does.
+`SID_LATCH_REGISTERS` (`$D419-$D41C`) load the SID's data-bus latch, which its write-only
+registers read back. A 6502 throw-away read is the unfixed address of an indexed access,
+followed in the same instruction by the fixed access at that address or, on a page cross,
+`$100` above it; the SID repeats every `$20`, so that access reaches the same register and
+reloads the latch. Only in page `$D7` can it leave the SID (for colour RAM), so only those
+mirrors are sensitive.
+
+`SENSITIVE` is every address of the I/O window that `memmap.io_register` decodes to a
+`SENSITIVE_REGISTERS` register (the VIC-II repeats every `$40` to `$D3FF`, each CIA every
+`$10` over its page), plus those `$D7xx` SID mirrors. Other I/O reads (raster polls, OSC3,
+timers, write-only SID registers, colour RAM) are dropped by the lift when their value is
+unused, and kept as `io_read` in order when it is used: a raster poll or a SID model probe
+(`LDA $D012 / CMP #$FC / BNE`, `LDA $D41B`) waits on the same hardware the original does.
 
 ## `translate_c64(image, init, play, *, loaded, song_reg="a", header="cgen.h", prefix=None)`
 
@@ -87,10 +96,11 @@ void tune_play(void) { cgen_play(0); }
 
 ## Validation
 
-`tests/test_cgen.py`: the I/O model (window, sensitive registers in every mirror); under gcc
+`tests/test_cgen.py`: the I/O model (window, read-effect registers per chip in every mirror,
+the SID latch mirrors, volatile-value registers not sensitive); under gcc
 with a logging host, a player storing SID registers through `STA $D400,Y` with `Y` from data
 (no region in the I/O page, writes equal to the 6502 original on `flat_mpu` for each song),
-a raster poll whose sensitive reads stay in order while an unused `$D418` read is dropped, a
-trap, the song stub; the `.c` across two data sets and two origins; the CLI; and with Docker,
+a raster poll whose reads stay in order while an unused `$D418` read is dropped, indexed
+stores whose throw-away read of `$D419` is dropped and of `$DC0D` and `$D71B` kept, a trap, the song stub; the `.c` across two data sets and two origins; the CLI; and with Docker,
 llvm-mos PRGs run on `flat_mpu`: the player's SID writes match the original's, and a trap
-jams inside `trap` with `cgen_trap` holding `k`.
+jams inside `trap` with `cgen_trap` holding a trap key.

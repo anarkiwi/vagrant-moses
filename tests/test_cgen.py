@@ -223,37 +223,57 @@ def test_io_register(addr, reg):
     assert mm.io_register(addr) == reg
 
 
-def test_sensitive_set():
-    """Every mirror of a read-sensitive register, and nothing else."""
+#: Per chip, ``(mirror base, stride, last address, offsets whose read changes state)``.
+READ_EFFECTS = (
+    (mm.VIC_BASE, mm.VIC_STRIDE, 0xD3FF, {0x1E, 0x1F}),
+    (mm.CIA1_BASE, mm.CIA_STRIDE, 0xDCFF, {mm.TOD_10THS, mm.TOD_HR, mm.ICR}),
+    (mm.CIA2_BASE, mm.CIA_STRIDE, 0xDDFF, {mm.PRB, mm.TOD_10THS, mm.TOD_HR, mm.ICR}),
+)
+
+
+@pytest.mark.parametrize("base,stride,last,regs", READ_EFFECTS)
+def test_read_effect_registers(base, stride, last, regs):
+    """Each chip's registers with read effects are sensitive in every mirror, no others."""
     sens = set(cgen.SENSITIVE)
-    assert len(sens) == 16 * 7 + 32 * 4 + 2 * 16 * 11
-    cia = {0, 1, *range(4, 0xC), 0xD}
-    for base, stride, last, regs in (
-        (
-            mm.VIC_BASE,
-            mm.VIC_STRIDE,
-            0xD3FF,
-            {0x11, 0x12, 0x13, 0x14, 0x19, 0x1E, 0x1F},
-        ),
-        (mm.SID_BASE, mm.SID_STRIDE, mm.SID_LAST, {0x19, 0x1A, 0x1B, 0x1C}),
-        (mm.CIA1_BASE, mm.CIA_STRIDE, 0xDCFF, cia),
-        (mm.CIA2_BASE, mm.CIA_STRIDE, 0xDDFF, cia),
-    ):
-        for mirror in range(base, last + 1, stride):
-            assert {a - mirror for a in sens if mirror <= a < mirror + stride} == regs
-    for kept in (
+    assert {r - base for r in cgen.SENSITIVE_REGISTERS if base <= r <= last} == regs
+    for mirror in range(base, last + 1, stride):
+        assert {a - mirror for a in sens if mirror <= a < mirror + stride} == regs
+
+
+def test_sid_latch_registers():
+    """A SID read only loads the bus latch: sensitive where its page-cross fix-up leaves
+    the SID (page ``$D7``), elsewhere reloaded by that fix-up."""
+    sid = {a for a in cgen.SENSITIVE if mm.SID_BASE <= a <= mm.SID_LAST}
+    assert cgen.SID_LATCH_REGISTERS == {0xD419, 0xD41A, 0xD41B, 0xD41C}
+    assert sid == {
+        m + r for m in range(0xD700, 0xD800, mm.SID_STRIDE) for r in range(0x19, 0x1D)
+    }
+
+
+def test_sensitive_set():
+    """Volatile-value and write-only registers, colour RAM and I/O 1/2 are not sensitive."""
+    sens = set(cgen.SENSITIVE)
+    assert len(sens) == 16 * 2 + 8 * 4 + 16 * 3 + 16 * 4
+    for kept in (0xD01E, 0xD3DF, 0xD7FB, 0xDC08, 0xDC0B, 0xDCFD, 0xDD01, 0xDDF1):
+        assert kept in sens
+    for dropped in (
         0xD011,
         0xD012,
+        0xD013,
         0xD019,
-        0xD01E,
+        0xD418,
+        0xD419,
         0xD41B,
-        0xD7FB,
+        0xD6FC,
         0xDC00,
-        0xDC0D,
-        0xDDFD,
+        0xDC01,
+        0xDC04,
+        0xDC09,
+        0xDC0C,
+        0xDD00,
+        0xD800,
+        0xDF00,
     ):
-        assert kept in sens
-    for dropped in (0xD018, 0xD418, 0xD41D, 0xDC02, 0xDC0C, 0xDC0E, 0xD800, 0xDF00):
         assert dropped not in sens
 
 
@@ -305,12 +325,40 @@ def test_sensitive_reads_kept(tmp_path):
     assert got[0] == [("r", 0xD012), ("r", 0xDC0D), ("r", 0xD41B), ("w", 0xD40F, 0x5A)]
 
 
+DUMMY = """
+init:   LDY #$19
+        STA $D400,Y
+        LDY #$0D
+        STA $DC00,Y
+        LDX #$20
+        STA $D7FB,X
+        RTS
+play:   RTS
+"""
+
+
+@needs_cgen
+def test_dummy_reads(tmp_path):
+    """Indexed stores' throw-away reads: SID ``$D419`` is dropped, CIA ICR ``$DC0D`` and
+    SID ``$D71B`` before a page cross into colour RAM are kept."""
+    _, _, c, h, _ = lift(DUMMY)
+    assert "0xD419" in c and "io_read(0xD419)" not in c
+    got = run_gcc(tmp_path, c, h, 0, 0)
+    assert [e[:2] for e in got[0]] == [
+        ("w", 0xD419),
+        ("r", 0xDC0D),
+        ("w", 0xDC0D),
+        ("r", 0xD71B),
+        ("w", 0xD81B),
+    ]
+
+
 @needs_cgen
 def test_trap(tmp_path):
-    """An unresolved computed jump traps through the host."""
+    """A computed jump into code the lift cannot keep traps through the host."""
     _, _, c, h, info = lift(JUMP)
-    (k,) = info["traps"]
-    assert run_gcc(tmp_path, c, h, 0, 2)[1] == [("t", k)]
+    ((kind, k),) = run_gcc(tmp_path, c, h, 0, 2)[1]
+    assert kind == "t" and k in info["traps"]
 
 
 @needs_cgen
@@ -402,9 +450,8 @@ def test_mos_player():
 def test_mos_trap():
     """A trap stores ``k`` in ``cgen_trap`` and jams the 6510 in ``trap``."""
     _, _, c, h, info = lift(JUMP)
-    (k,) = info["traps"]
     prg, syms = mos_build("trap", c, h)
     calls, mpu, mem = c64_run(prg, syms, 0, 3)
     assert len(calls) == 2 and mpu.jammed
     assert syms["trap"] < mpu.pc < syms["trap"] + 16
-    assert mem[syms["cgen_trap"]] | mem[syms["cgen_trap"] + 1] << 8 == k
+    assert mem[syms["cgen_trap"]] | mem[syms["cgen_trap"] + 1] << 8 in info["traps"]

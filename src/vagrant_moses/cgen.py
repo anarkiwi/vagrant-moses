@@ -17,30 +17,32 @@ from .c64 import poweron_ram
 #: The I/O window ``[lo, hi)``: its writes are kept in order and none of it is data.
 VOLATILE = ((mm.IO_BASE, mm.IO_LAST + 1),)
 
-#: Unmirrored registers whose reads have effects or see the machine run.
+#: Unmirrored registers whose read changes device state: the VIC-II collision registers
+#: (cleared, with their IRQ sources), each CIA's ICR (flags cleared, IRQ released) and TOD
+#: tenths and hours (release and set the TOD read latch), and CIA 2's port B (pulses PC2
+#: on the user port).
 SENSITIVE_REGISTERS = frozenset(
-    {
-        mm.VIC_CONTROL_1,
-        mm.VIC_RASTER,
-        mm.VIC_LIGHTPEN_X,
-        mm.VIC_LIGHTPEN_Y,
-        mm.VIC_IRQ_STATUS,
-        mm.VIC_SPRITE_SPRITE,
-        mm.VIC_SPRITE_DATA,
-        *range(mm.SID_POTX, mm.SID_ENV3 + 1),
-    }
+    {mm.VIC_SPRITE_SPRITE, mm.VIC_SPRITE_DATA, mm.CIA2_BASE + mm.PRB}
     | {
         base + reg
         for base in (mm.CIA1_BASE, mm.CIA2_BASE)
-        for reg in (mm.PRA, mm.PRB, *range(mm.TA_LO, mm.TOD_HR + 1), mm.ICR)
+        for reg in (mm.TOD_10THS, mm.TOD_HR, mm.ICR)
     }
 )
 
-#: Every I/O address decoding to a :data:`SENSITIVE_REGISTERS` register.
+#: SID registers whose read loads the SID's data-bus latch, which its write-only registers
+#: read back.
+SID_LATCH_REGISTERS = frozenset(range(mm.SID_POTX, mm.SID_ENV3 + 1))
+
+#: Every I/O address whose throw-away read is observable: a mirror of a
+#: :data:`SENSITIVE_REGISTERS` register, or of a :data:`SID_LATCH_REGISTERS` register whose
+#: indexed fix-up access (the same address, or ``$100`` above it on a page cross) can leave
+#: the register and so not reload the latch.
 SENSITIVE = tuple(
     a
     for a in range(mm.IO_BASE, mm.IO_LAST + 1)
-    if mm.io_register(a) in SENSITIVE_REGISTERS
+    if (r := mm.io_register(a)) in SENSITIVE_REGISTERS
+    or (r in SID_LATCH_REGISTERS and mm.io_register(a + 0x100) != r)
 )
 
 ENTRIES = ("cgen_init", "cgen_play")
