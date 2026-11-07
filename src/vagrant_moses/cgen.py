@@ -53,22 +53,28 @@ HOST = """
 #include "driver.h"
 
 #ifndef CGEN_HOST
-volatile uint16_t cgen_trap;
-
 uint8_t io_read(uint16_t a) { return *(volatile uint8_t *)a; }
 
 void io_write(uint16_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
-
-__attribute__((noinline)) void trap(uint16_t k) {
-  cgen_trap = k;
-  for (;;)
-    __asm__ volatile(".byte 0x02");
-}
 #endif
 
 void tune_init(uint8_t song) { cgen_init(song); }
 
 void tune_play(void) { cgen_play(0); }
+"""
+
+
+#: The C64 ``trap``, its own translation unit: it stores ``k`` in ``cgen_trap`` and jams the
+#: 6510. The lift declares it a ``leaf``, which holds only when it is compiled apart.
+TRAP = """#include <stdint.h>
+
+volatile uint16_t cgen_trap;
+
+__attribute__((noinline, noreturn)) void trap(uint16_t k) {
+  cgen_trap = k;
+  for (;;)
+    __asm__ volatile(".byte 0x02");
+}
 """
 
 
@@ -91,7 +97,8 @@ def translate_c64(  # pylint: disable=too-many-arguments
 ):
     """``(c_text, h_text, info)`` of the program in ``image`` (64 KiB) loaded at ``loaded``
     (``[lo, hi)``): ``init`` gets the song in ``song_reg``, ``play`` ``A = 0``; the I/O
-    model is :data:`VOLATILE` and :data:`SENSITIVE` and the ``.c`` ends with :data:`HOST`.
+    model is :data:`VOLATILE` and :data:`SENSITIVE` and the ``.c`` ends with :data:`HOST`;
+    the host links :data:`TRAP` beside it.
     """
     from deity_informant import cgen  # pylint: disable=import-outside-toplevel
 
@@ -147,6 +154,7 @@ def main(argv=None):
     )
     Path(args.out).write_text(c, encoding="utf-8")
     header.write_text(h, encoding="utf-8")
+    Path(args.out).with_name("cgen_trap.c").write_text(TRAP, encoding="utf-8")
     stages = ", ".join(f"{k} {v:.2f} s" for k, v in info["times"].items())
     print(
         f"{args.out}: {len(c)} bytes, {len(info['regions'])} regions, "

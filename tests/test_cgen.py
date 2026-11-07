@@ -171,7 +171,15 @@ def run_gcc(tmp_path, c, h, song, frames, preset=()):
         (tmp_path / name).write_text(text)
     (tmp_path / "host.c").write_text(HARNESS)
     exe = tmp_path / "run"
-    cmd = ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror", "-DCGEN_HOST"]
+    cmd = [
+        "gcc",
+        "-std=c99",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-DCGEN_HOST",
+        "-DCGEN_OOB_EXACT",
+    ]
     cmd += [f"-I{tmp_path}", "-o", str(exe), str(tmp_path / "tune.c")]
     subprocess.run([*cmd, str(tmp_path / "host.c")], check=True)
     args = [str(song), str(frames), *(str(v) for kv in preset for v in kv)]
@@ -299,7 +307,11 @@ def test_indexed_sid_writes_no_region(tmp_path):
     narrow = di_translate(
         image, [(labels["play"], "p")], [(0xD400, 0xD41D)], loaded=loaded
     )
-    assert any(mm.IO_BASE <= org <= mm.IO_LAST for org, _ in narrow[2]["regions"])
+    # The offsets Y takes, every value the program stores to its table, lie in the window.
+    assert "io_write(0xD400 + " in narrow[0]
+    assert all(
+        org + n <= mm.IO_BASE or org > mm.IO_LAST for org, n in narrow[2]["regions"]
+    )
     for song in range(4):
         got = run_gcc(tmp_path, c, h, song, 40)
         assert writes(got) == reference(image, labels, song, 40)
@@ -378,6 +390,7 @@ def test_cli(tmp_path, capsys):
     argv += ["--play", str(labels["play"]), "-o", str(tmp_path / "p.c")]
     assert cgen.main(argv) == 0
     assert '#include "p.h"' in (tmp_path / "p.c").read_text()
+    assert (tmp_path / "cgen_trap.c").read_text() == cgen.TRAP
     assert "R0_ORG" in (tmp_path / "p.h").read_text()
     assert "traps" in capsys.readouterr().err
 
@@ -402,12 +415,17 @@ def mos_build(name, c, h):
         ("tune.h", h),
         ("driver.h", DRIVER_H),
         ("driver.c", DRIVER_C),
+        ("trap.c", cgen.TRAP),
     ):
         (out / f).write_text(text)
     cmd = ["docker", "run", "--rm", "-v", f"{out}:/w", "-w", "/w", MOS, "mos-c64-clang"]
-    cmd += ["-std=c99", "-Os", "-Wall", "-Wextra", "-Werror", "-I.", "-o", "t.prg"]
+    cmd += ["-std=c99", "-Os", "-Wall", "-Wextra", "-Werror", "-DCGEN_OOB_EXACT", "-I."]
+    cmd += ["-o", "t.prg"]
     done = subprocess.run(
-        [*cmd, "tune.c", "driver.c"], capture_output=True, text=True, check=False
+        [*cmd, "tune.c", "driver.c", "trap.c"],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert done.returncode == 0, done.stderr
     return (out / "t.prg").read_bytes(), load_elf(out / "t.prg.elf")[1]
