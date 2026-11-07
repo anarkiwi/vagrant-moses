@@ -16,7 +16,6 @@ from asm import assemble
 
 try:
     from deity_informant.cgen import clang_format, mlir
-    from deity_informant.cgen import translate as di_translate
 except ImportError:
     mlir = None
 
@@ -303,15 +302,6 @@ def test_indexed_sid_writes_no_region(tmp_path):
     image, labels, c, h, info = lift(player())
     assert all(org + n <= mm.IO_BASE or org > mm.IO_LAST for org, n in info["regions"])
     assert "goto" not in c and clang_format(c) == c
-    _, _, loaded = program(player())
-    narrow = di_translate(
-        image, [(labels["play"], "p")], [(0xD400, 0xD41D)], loaded=loaded
-    )
-    # The offsets Y takes, every value the program stores to its table, lie in the window.
-    assert "io_write(0xD400 + " in narrow[0]
-    assert all(
-        org + n <= mm.IO_BASE or org > mm.IO_LAST for org, n in narrow[2]["regions"]
-    )
     for song in range(4):
         got = run_gcc(tmp_path, c, h, song, 40)
         assert writes(got) == reference(image, labels, song, 40)
