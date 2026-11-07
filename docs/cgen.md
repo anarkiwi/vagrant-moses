@@ -67,17 +67,9 @@ data, or relocated, give a byte-identical `.c`; the `.h` holds the data regions.
 #include "driver.h"
 
 #ifndef CGEN_HOST
-volatile uint16_t cgen_trap;
-
 uint8_t io_read(uint16_t a) { return *(volatile uint8_t *)a; }
 
 void io_write(uint16_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
-
-__attribute__((noinline)) void trap(uint16_t k) {
-  cgen_trap = k;
-  for (;;)
-    __asm__ volatile(".byte 0x02");
-}
 #endif
 
 void tune_init(uint8_t song) { cgen_init(song); }
@@ -86,13 +78,16 @@ void tune_play(void) { cgen_play(0); }
 ```
 
 - `io_read`/`io_write` access the C64's I/O directly.
-- `trap(k)` stores `k` in `cgen_trap` and executes a 6510 JAM inside `trap`, so an emulator
-  halts at a known PC with the trap number readable through the ELF symbol; `k` indexes
-  `info["traps"]` (the original PC and kind).
+- `TRAP` is `trap(k)`, a translation unit of its own that the host compiles and links beside
+  the `.c` (the CLI writes it as `cgen_trap.c`): it stores `k` in `cgen_trap` and executes a
+  6510 JAM, so an emulator halts at a known PC with the trap number readable through the ELF
+  symbol; `k` indexes `info["traps"]` (the original PC and kind). The lift declares `trap`
+  `noreturn` and `leaf`; compiled apart, its JAM does not keep the compiler from proving the
+  lifted functions non-recursive and placing their locals statically.
 - `tune_init`/`tune_play` implement a driver's `driver.h` (`main` calls `tune_init(song)`, then
   `tune_play()` once per frame); play gets `A = 0`, as a PSID player's play call does.
-- Defining `CGEN_HOST` drops the C64 accessors and `trap` for a host that supplies its own
-  (a gcc test harness logging accesses and leaving `trap` by `longjmp`).
+- Defining `CGEN_HOST` drops the C64 accessors for a host that supplies its own (a gcc test
+  harness logging accesses, with a `trap` leaving by `longjmp`).
 
 ## Validation
 
