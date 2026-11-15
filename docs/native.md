@@ -74,6 +74,24 @@ applies.
 `run(limit)` releases the GIL. While it runs, other threads get `RuntimeError` from any
 attribute access; independent machines run in parallel.
 
+## Clone
+
+`clone()` forks the machine: the copy, run for any number of cycles, behaves exactly as the
+original run for the same cycles. `Core::fork` copies everything the core models (the CPU,
+RAM, ROM images, banking, colour RAM, VIC-II, both CIAs, interrupt lines, scheduler, pending
+I/O writes, open-bus seed, last read, REU, collected events) as plain Rust values; the opcode
+layouts are shared. Nothing goes through Python, so a fork is a few memory copies (the four
+64 KiB images, plus the REU's RAM).
+
+- Each `NativeSid` is copied into a new `NativeSid` with the same bus value, `last` and
+  `on_read`, and empty write logs; a Python SID device object is shared by both machines.
+- The clone has no `on_event` sink (its events collect in `events`, which starts as a copy
+  of the original's), no `on_io`, no trap, decode or port hook, and fresh views.
+- It is refused with `RuntimeError` while the machine runs (also from its own hooks or
+  sink) or while the SMC recorder is armed.
+
+A clone is idle and unclaimed, so clones run in parallel threads.
+
 ## Hooks
 
 - `set_trap(callback, watch)`: before decoding, while `pc` is in `watch` (a set of
@@ -263,7 +281,9 @@ comparison at the first such fetch.
 
 `pytest` runs `tests/test_machine.py` on both backends and with each kind of SID,
 `tests/test_native.py` for the Python surface and hooks, `tests/test_sid.py` for `NativeSid`,
-and six differential programs per SID kind. For the full gate:
+`tests/test_clone.py` for `clone()` on both backends, and six differential programs per SID
+kind. `tools/diff_machines.py` also clones each program halfway on both backends and checks
+the clone ends as the original. For the full gate:
 
 ```bash
 python tools/diff_machines.py --programs 500 --cycles 2000000 --sid both

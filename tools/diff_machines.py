@@ -1,4 +1,5 @@
-"""Run random programs on the Python and native machines and report any divergence.
+"""Run random programs on the Python and native machines and report any divergence,
+and on each machine a clone taken halfway that does not end as the original.
 
 python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24 [--sid logged]
 """
@@ -19,9 +20,11 @@ import machine_diff  # pylint: disable=wrong-import-position
 
 def _one(args):
     seed, cycles, logged = args
-    return f"{seed}{' (logged)' if logged else ''}", machine_diff.compare(
-        seed, cycles, logged
-    )
+    why = machine_diff.compare(seed, cycles, logged)
+    for backend in ("python", "native"):
+        clone = machine_diff.clone_divergence(seed, cycles, backend, logged)
+        why = why or (clone and f"{backend} clone: {clone}")
+    return f"{seed}{' (logged)' if logged else ''}", why
 
 
 def main():

@@ -99,6 +99,76 @@ pub struct Sys {
 }
 
 impl Sys {
+    /// An independent copy while no SMC recorder is armed (else `None`). Each logged SID's
+    /// state is copied with empty write logs; host devices keep their index.
+    pub fn fork(&self) -> Option<Sys> {
+        let Sys {
+            sched,
+            vic,
+            cia,
+            ln,
+            img,
+            map,
+            colour,
+            port_dir,
+            port_data,
+            bits,
+            io,
+            pending,
+            last_read,
+            seed,
+            sids,
+            events,
+            custom_sink,
+            port_dirty,
+            reu,
+            dma,
+            rmw,
+            rec,
+        } = self;
+        if rec.is_some() {
+            return None;
+        }
+        let sids = sids
+            .iter()
+            .map(|(base, dev)| {
+                let dev = match dev {
+                    SidDev::Host(i) => SidDev::Host(*i),
+                    // SAFETY: serialised by the machine's run claim; no reference outlives
+                    // the copy.
+                    SidDev::Logged(state, i) => {
+                        SidDev::Logged(Arc::new(unsafe { state.state() }.fork().into()), *i)
+                    }
+                };
+                (*base, dev)
+            })
+            .collect();
+        Some(Sys {
+            sched: sched.clone(),
+            vic: vic.clone(),
+            cia: cia.clone(),
+            ln: ln.clone(),
+            img: img.clone(),
+            map: *map,
+            colour: colour.clone(),
+            port_dir: *port_dir,
+            port_data: *port_data,
+            bits: *bits,
+            io: *io,
+            pending: pending.clone(),
+            last_read: *last_read,
+            seed: *seed,
+            sids,
+            events: events.clone(),
+            custom_sink: *custom_sink,
+            port_dirty: *port_dirty,
+            reu: reu.clone(),
+            dma: *dma,
+            rmw: *rmw,
+            rec: None,
+        })
+    }
+
     pub fn remap(&mut self) {
         let bits = ((self.port_data | !self.port_dir) & 7) as i32;
         if bits == self.bits {

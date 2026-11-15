@@ -9,6 +9,7 @@ reading any other register halves the time left; the value becomes 0 once it has
 
 from __future__ import annotations
 
+import copy
 import itertools
 import struct
 from typing import Callable, List, Tuple
@@ -70,6 +71,12 @@ class PyNativeSid:
         self._age(cycle)
         self._drive(value)
         return value
+
+    def fork(self) -> "PyNativeSid":
+        """A copy with empty write logs: the bus value and register values carry over."""
+        out = copy.copy(self)
+        out._writes, out._rows, out._last = [], [], bytearray(self._last)
+        return out
 
     def drain_writes(self) -> List[Write]:
         """Every write since the last drain as ``(cycle, reg, value)``."""

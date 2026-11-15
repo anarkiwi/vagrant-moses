@@ -761,6 +761,77 @@ impl Machine {
         err.map_or(Ok(()), Err)
     }
 
+    /// An independent machine that runs cycle-identically to this one from here on.
+    ///
+    /// Everything the machine models is copied. Python SID devices are shared; each
+    /// `NativeSid` is copied with empty write logs. Events collect into the copy's
+    /// `events` (no `on_event` sink); `on_io`, the trap, decode and port hooks are not
+    /// carried over. Refused while the machine runs or the SMC recorder is armed.
+    fn clone(slf: &Bound<'_, Self>) -> PyResult<Py<Machine>> {
+        let py = slf.py();
+        let me = slf.get();
+        let _claim = me.owner.claim()?;
+        let _sids = me
+            .logged
+            .iter()
+            .map(|sid| sid.get().owner.claim())
+            .collect::<PyResult<Vec<_>>>()?;
+        // SAFETY: claimed above, so no run or hook holds the core.
+        let mut core = unsafe { &*me.core.get() }
+            .fork()
+            .ok_or_else(|| PyRuntimeError::new_err("the SMC recorder is armed"))?;
+        (core.trap_set, core.decode_set, core.port_set) = (false, false, false);
+        core.s.custom_sink = false;
+        let sids = PyDict::new(py);
+        let mut logged: Vec<Py<NativeSid>> = Vec::new();
+        for (base, dev) in &core.s.sids {
+            let old = me.sids.bind(py).get_item(base)?;
+            let old = old.ok_or_else(|| PyRuntimeError::new_err("SID base not found"))?;
+            let new = match dev {
+                SidDev::Logged(state, _) => {
+                    let sid = old.cast::<NativeSid>()?.get();
+                    let n = Py::new(
+                        py,
+                        NativeSid {
+                            shared: Arc::clone(state),
+                            on_read: sid.on_read.clone_ref(py),
+                            owner: Owner::default(),
+                            model: sid.model.clone(),
+                        },
+                    )?;
+                    logged.push(n.clone_ref(py));
+                    n.into_any()
+                }
+                SidDev::Host(_) => old.unbind(),
+            };
+            sids.set_item(base, new)?;
+        }
+        let devs = me
+            .devs
+            .iter()
+            .map(|d| HostDev {
+                obj: d.obj.clone_ref(py),
+                on_read: d.on_read,
+            })
+            .collect();
+        Py::new(
+            py,
+            Machine {
+                core: UnsafeCell::new(Box::new(core)),
+                devs,
+                logged,
+                sids: sids.unbind(),
+                sink: None,
+                on_io: None,
+                hooks: UnsafeCell::new(Hooks::default()),
+                owner: Owner::default(),
+                active: AtomicPtr::new(ptr::null_mut()),
+                ntsc: me.ntsc,
+                views: Default::default(),
+            },
+        )
+    }
+
     /// Bring the chips to `cycle` (default: the power-on delay) and start the CPU at `entry`.
     #[pyo3(signature = (entry, cycle=None))]
     fn reset(slf: &Bound<'_, Self>, entry: u16, cycle: Option<i64>) -> PyResult<i64> {

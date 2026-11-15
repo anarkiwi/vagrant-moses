@@ -2,6 +2,7 @@
 //! around jennings' instruction semantics.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use jennings_core::{AddrSet, Cpu};
 
@@ -68,6 +69,7 @@ pub struct Layout {
 }
 
 /// The addresses a trap is called at.
+#[derive(Clone)]
 pub enum Watch {
     All,
     Set(AddrSet),
@@ -101,7 +103,7 @@ pub struct Config {
 pub struct Core {
     pub cpu: Cpu,
     pub s: Sys,
-    layouts: Vec<Layout>,
+    layouts: Arc<[Layout]>,
     layout: usize,
     idx: i32,
     base: i32,
@@ -175,7 +177,7 @@ impl Core {
         Core {
             cpu: Cpu::new(),
             s,
-            layouts,
+            layouts: layouts.into(),
             layout: BRK_LAYOUT,
             idx: 6,
             base: 0,
@@ -200,6 +202,67 @@ impl Core {
             decode_set: false,
             port_set: false,
         }
+    }
+
+    /// An independent copy that runs cycle-identically to this core, or `None` while the
+    /// SMC recorder is armed (see [`Sys::fork`]).
+    pub fn fork(&self) -> Option<Core> {
+        let Core {
+            cpu,
+            s,
+            layouts,
+            layout,
+            idx,
+            base,
+            exec_at,
+            rmw,
+            taken,
+            cross,
+            op_pc,
+            dummy,
+            vec_addr,
+            target,
+            d1x1,
+            ikind,
+            t,
+            jammed,
+            stop,
+            ntsc,
+            armed,
+            arm_pc,
+            watch,
+            trap_set,
+            decode_set,
+            port_set,
+        } = self;
+        Some(Core {
+            cpu: cpu.clone(),
+            s: s.fork()?,
+            layouts: Arc::clone(layouts),
+            layout: *layout,
+            idx: *idx,
+            base: *base,
+            exec_at: *exec_at,
+            rmw: *rmw,
+            taken: *taken,
+            cross: *cross,
+            op_pc: *op_pc,
+            dummy: *dummy,
+            vec_addr: *vec_addr,
+            target: *target,
+            d1x1: *d1x1,
+            ikind: *ikind,
+            t: *t,
+            jammed: *jammed,
+            stop: *stop,
+            ntsc: *ntsc,
+            armed: *armed,
+            arm_pc: *arm_pc,
+            watch: watch.clone(),
+            trap_set: *trap_set,
+            decode_set: *decode_set,
+            port_set: *port_set,
+        })
     }
 
     /// Bring the chips to `cycle` and start the CPU at `entry` (`Machine.reset`).
