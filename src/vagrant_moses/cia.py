@@ -2,12 +2,14 @@
 
 A port of ``timer.cpp``, ``interrupt.cpp`` and ``mos652x.cpp`` (VICE's ``ciatimer``
 state machine) onto :mod:`~vagrant_moses.eventsched`. TOD and the serial port are
-not modelled: their registers read back what was written.
+not modelled: their registers read back what was written. ``Cia.keys`` is the
+keyboard matrix across the ports (CIA 1): row ``r`` is PA line ``r``, column ``c``
+PB line ``c``, as VICE's ``keyarr``.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Tuple
 
 from .eventsched import PHI1, PHI2, Event, Scheduler
 
@@ -44,6 +46,17 @@ class Timer:
         self.pb_toggle = False
         self.state = self.last_control = self.pause = 0
         self.sched.schedule(self.event, 1, PHI1)
+
+    def seed(self, counter: int, latch: int, cr: int) -> None:
+        """Set counter, latch and control as a timer long in that mode (sync first)."""
+        self.timer, self.latch = counter & 0xFFFF, latch & 0xFFFF
+        state = (cr & (_CR_MASK & ~_CR_FLOAD)) ^ _PHI2IN
+        if state & (_START | _PHI2IN) == _START | _PHI2IN:
+            state |= _COUNT2 | _COUNT3
+        if state & _CR_ONESHOT:
+            state |= _ONESHOT0 | _ONESHOT
+        self.state, self.last_control = state, cr
+        self.wake()
 
     def set_control(self, cr: int) -> None:
         """Latch control register bits into the pipeline state."""
@@ -249,6 +262,7 @@ class Cia:
         self.timer_b = Timer(sched, self._underflow_b)
         self.source = InterruptSource(sched, interrupt, new)
         self.b_tick = Event(self.timer_b.cascade)
+        self.keys = bytearray(8)
 
     def reset(self) -> None:
         """Power-on: registers zero, timers stopped at ``$FFFF``."""
@@ -266,8 +280,21 @@ class Cia:
     def _underflow_b(self) -> None:
         self.source.trigger(UNDERFLOW_B)
 
+    def _port(self, n: int) -> int:
+        """Port ``n``'s pins: its output, pulled low through held keys by the other port."""
+        regs, keys = self.regs, self.keys
+        data = (regs[n] | ~regs[DDRA + n]) & 0xFF
+        if any(keys):
+            low = ~regs[1 - n] & regs[DDRB - n]
+            for r, cols in enumerate(keys):
+                if n and low >> r & 1:
+                    data &= ~cols
+                elif not n and cols & low:
+                    data &= ~(1 << r)
+        return data
+
     def _port_b(self) -> int:
-        data = (self.regs[PRB] | ~self.regs[DDRB]) & 0xFF
+        data = self._port(PRB)
         if self.regs[CRA] & 0x02:
             data = data & 0xBF | (0x40 if self.timer_a.pb(self.regs[CRA]) else 0)
         if self.regs[CRB] & 0x02:
@@ -281,7 +308,7 @@ class Cia:
             timer.sync()
             timer.wake()
         if addr == PRA:
-            return (self.regs[PRA] | ~self.regs[DDRA]) & 0xFF
+            return self._port(PRA)
         if addr == PRB:
             return self._port_b()
         if TAL <= addr <= TBH:
@@ -293,6 +320,36 @@ class Cia:
             timer = self.timer_b if addr == CRB else self.timer_a
             return (self.regs[addr] & 0xEE) | (timer.state & 1)
         return self.regs[addr]
+
+    def timer(self, n: int) -> Tuple[int, int]:
+        """``(counter, latch)`` of timer ``n`` (0 = A, 1 = B)."""
+        timer = (self.timer_a, self.timer_b)[n]
+        return timer.timer, timer.latch
+
+    def seed_timer(self, n: int, counter: int, latch: int, control: int) -> None:
+        """Set timer ``n``'s counter, latch and control register as if long running.
+
+        The counter is the value now; a started timer counts from the next PHI1.
+        The timer is brought up to date first; force load (bit 4) is ignored and the
+        ICR is untouched.
+        """
+        if n not in (0, 1):
+            raise ValueError("a CIA has timers 0 and 1")
+        timer = self.timer_b if n else self.timer_a
+        timer.sync()
+        self.regs[CRA + n] = control & 0xEF
+        self.regs[TAL + 2 * n], self.regs[TAH + 2 * n] = latch & 0xFF, latch >> 8 & 0xFF
+        cr = control | (control & 0x40) >> 1 if n else control
+        timer.seed(counter, latch, cr)
+
+    @property
+    def icr_mask(self) -> int:
+        """The ICR mask."""
+        return self.source.icr
+
+    def seed_icr(self, mask: int) -> None:
+        """Replace the ICR mask without raising or clearing the interrupt now."""
+        self.source.icr = mask & 0x7F
 
     def write(self, addr: int, data: int) -> None:
         """A CPU write of ``data`` to register ``addr``."""

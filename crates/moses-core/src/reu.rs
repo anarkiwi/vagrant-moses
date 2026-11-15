@@ -53,6 +53,7 @@ fn all(reg: u8, bit: u8) -> bool {
     reg & (INT_ENABLE | bit) == INT_ENABLE | bit
 }
 
+#[derive(Clone)]
 pub struct Reu {
     pub size_kb: u32,
     pub ram: Vec<u8>,

@@ -11,6 +11,7 @@ const FIRST_DMA_LINE: i32 = 0x30;
 const LAST_DMA_LINE: i32 = 0xF7;
 const FETCH_CYCLE: i32 = 11;
 const TEXT_COLS: i32 = 40;
+const BA_END: i32 = 54;
 const IRQ_RASTER: u8 = 1;
 
 /// Sprite DMA state (`sprites.h`): which sprites fetch data this line.
@@ -148,6 +149,48 @@ impl Vic {
             E_BADLINE => ln.set_ba(!self.bad_line),
             _ => self.edge(s, ln),
         }
+    }
+
+    /// Set the raster compare value (`$D012` and `$D011` bit 7) as if latched long ago:
+    /// a beam already on `line` raises nothing until the next match.
+    pub fn seed_raster_compare(&mut self, line: u16, s: &mut Sched, ln: &mut Lines) {
+        self.sync(s, ln);
+        self.regs[0x12] = line as u8;
+        self.regs[0x11] = self.regs[0x11] & 0x7F | (line >> 1 & 0x80) as u8;
+        self.raster_cond = self.raster_y == self.compare();
+    }
+
+    /// Put the beam so the next VIC clock (the next PHI1) is `cycle` of `line`; false if
+    /// that is off the raster. Badline state follows `$D011` and BA is set as the line
+    /// has it after the previous cycle; sprite DMA is not changed, and the compare
+    /// matching the current line raises nothing.
+    pub fn seed_beam(&mut self, line: i32, cycle: i32, s: &mut Sched, ln: &mut Lines) -> bool {
+        if !(0..self.max_rasters).contains(&line) || !(0..self.cycles_per_line).contains(&cycle) {
+            return false;
+        }
+        for ev in [E_VIC, E_EDGE, E_BADLINE] {
+            s.cancel(ev);
+        }
+        let (line, cycle) = if cycle > 0 {
+            (line, cycle - 1)
+        } else {
+            (line - 1, self.cycles_per_line - 1)
+        };
+        self.vblanking = line == 0 && cycle == 0;
+        self.raster_y = if self.vblanking {
+            self.max_rasters - 1
+        } else {
+            line.rem_euclid(self.max_rasters)
+        };
+        self.line_cycle = cycle;
+        self.raster_clk = ((s.now + 1) >> 1) - 1;
+        let y = self.raster_y;
+        self.bad_lines_enabled = self.den() && (FIRST_DMA_LINE..=LAST_DMA_LINE).contains(&y);
+        self.bad_line = self.is_bad_line();
+        self.raster_cond = y == self.compare();
+        ln.set_ba(!(self.bad_line && (FETCH_CYCLE..BA_END).contains(&cycle)));
+        s.schedule(E_VIC, 0, PHI1);
+        true
     }
 
     fn compare(&self) -> i32 {

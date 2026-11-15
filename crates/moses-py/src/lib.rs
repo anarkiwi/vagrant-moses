@@ -598,7 +598,7 @@ impl Machine {
         Self::view(slf, 1)
     }
 
-    /// The 16 4 KiB pages as the CPU maps them: RAM, a ROM image, or `None` for I/O.
+    /// The sixteen pages as the CPU maps them: RAM, a ROM image, or `None` for I/O.
     #[getter]
     fn pages(slf: &Bound<'_, Self>) -> PyResult<Vec<Option<Py<Memory>>>> {
         let map = slf.get().core()?.s.map;
@@ -647,6 +647,43 @@ impl Machine {
             machine: slf.clone().unbind(),
             which: 2,
         }
+    }
+
+    /// CIA 1's keyboard matrix: byte `row` (PA line) has bit `col` (PB line) set per key held.
+    #[getter]
+    fn keymatrix<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, &self.core()?.s.cia[0].keys))
+    }
+
+    #[setter]
+    fn set_keymatrix(&self, rows: &Bound<'_, PyAny>) -> PyResult<()> {
+        let rows: [u8; 8] = octets(rows)?
+            .try_into()
+            .map_err(|_| PyValueError::new_err("the keyboard matrix has 8 rows"))?;
+        self.core()?.s.cia[0].keys = rows;
+        Ok(())
+    }
+
+    /// Hold (`down`) or release the key at PA line `row`, PB line `col`.
+    fn set_key(&self, row: i64, col: i64, down: bool) -> PyResult<()> {
+        if !(0..8).contains(&row) || !(0..8).contains(&col) {
+            return Err(PyValueError::new_err(format!(
+                "key ({row}, {col}) is off the matrix"
+            )));
+        }
+        let keys = &mut self.core()?.s.cia[0].keys[row as usize];
+        *keys = if down {
+            *keys | 1 << col
+        } else {
+            *keys & !(1 << col)
+        };
+        Ok(())
+    }
+
+    /// Release every key.
+    fn release_all(&self) -> PyResult<()> {
+        self.core()?.s.cia[0].keys = [0; 8];
+        Ok(())
     }
 
     #[getter]
@@ -761,6 +798,77 @@ impl Machine {
         err.map_or(Ok(()), Err)
     }
 
+    /// An independent machine that runs cycle-identically to this one from here on.
+    ///
+    /// Everything the machine models is copied. Python SID devices are shared; each
+    /// `NativeSid` is copied with empty write logs. Events collect into the copy's
+    /// `events` (no `on_event` sink); `on_io`, the trap, decode and port hooks are not
+    /// carried over. Refused while the machine runs or the SMC recorder is armed.
+    fn clone(slf: &Bound<'_, Self>) -> PyResult<Py<Machine>> {
+        let py = slf.py();
+        let me = slf.get();
+        let _claim = me.owner.claim()?;
+        let _sids = me
+            .logged
+            .iter()
+            .map(|sid| sid.get().owner.claim())
+            .collect::<PyResult<Vec<_>>>()?;
+        // SAFETY: claimed above, so no run or hook holds the core.
+        let mut core = unsafe { &*me.core.get() }
+            .fork()
+            .ok_or_else(|| PyRuntimeError::new_err("the SMC recorder is armed"))?;
+        (core.trap_set, core.decode_set, core.port_set) = (false, false, false);
+        core.s.custom_sink = false;
+        let sids = PyDict::new(py);
+        let mut logged: Vec<Py<NativeSid>> = Vec::new();
+        for (base, dev) in &core.s.sids {
+            let old = me.sids.bind(py).get_item(base)?;
+            let old = old.ok_or_else(|| PyRuntimeError::new_err("SID base not found"))?;
+            let new = match dev {
+                SidDev::Logged(state, _) => {
+                    let sid = old.cast::<NativeSid>()?.get();
+                    let n = Py::new(
+                        py,
+                        NativeSid {
+                            shared: Arc::clone(state),
+                            on_read: sid.on_read.clone_ref(py),
+                            owner: Owner::default(),
+                            model: sid.model.clone(),
+                        },
+                    )?;
+                    logged.push(n.clone_ref(py));
+                    n.into_any()
+                }
+                SidDev::Host(_) => old.unbind(),
+            };
+            sids.set_item(base, new)?;
+        }
+        let devs = me
+            .devs
+            .iter()
+            .map(|d| HostDev {
+                obj: d.obj.clone_ref(py),
+                on_read: d.on_read,
+            })
+            .collect();
+        Py::new(
+            py,
+            Machine {
+                core: UnsafeCell::new(Box::new(core)),
+                devs,
+                logged,
+                sids: sids.unbind(),
+                sink: None,
+                on_io: None,
+                hooks: UnsafeCell::new(Hooks::default()),
+                owner: Owner::default(),
+                active: AtomicPtr::new(ptr::null_mut()),
+                ntsc: me.ntsc,
+                views: Default::default(),
+            },
+        )
+    }
+
     /// Bring the chips to `cycle` (default: the power-on delay) and start the CPU at `entry`.
     #[pyo3(signature = (entry, cycle=None))]
     fn reset(slf: &Bound<'_, Self>, entry: u16, cycle: Option<i64>) -> PyResult<i64> {
@@ -784,7 +892,7 @@ impl Machine {
         Ok(cycle)
     }
 
-    /// Arm the SMC recorder over the lift-time `image` (64 KiB) with the per-opcode `table`
+    /// Arm the SMC recorder over the lift-time whole-address-space `image` with the per-opcode `table`
     /// (256 bytes, `vagrant_moses.smc.opcode_table`); a re-arm starts afresh.
     #[pyo3(signature = (image, table, banked=true))]
     fn smc_arm(
@@ -1622,7 +1730,8 @@ registers!(
     (sp, set_sp, sp, u8, 0xFF)
 );
 
-/// Read-only view of a chip's registers and beam/timer state (`machine.vic`, `cia1`, `cia2`).
+/// View of a chip's registers and beam/timer state (`machine.vic`, `cia1`, `cia2`), with
+/// the `seed_*` setters that align it with a live machine.
 #[pyclass(module = "vagrant_moses._core", name = "Chip", frozen)]
 pub struct Chip {
     machine: Py<Machine>,
@@ -1672,6 +1781,70 @@ impl Chip {
         }
         let t = &self.machine.get().core()?.s.cia[self.which as usize - 1].t[n];
         Ok((t.timer, t.latch))
+    }
+
+    /// Set CIA timer `n`'s counter, latch and control register as if long running.
+    fn seed_timer(&self, n: usize, counter: u16, latch: u16, control: u8) -> PyResult<()> {
+        if self.which == 0 || n > 1 {
+            return Err(PyValueError::new_err("a CIA has timers 0 and 1"));
+        }
+        let s = &mut self.machine.get().core()?.s;
+        s.cia[self.which as usize - 1].seed_timer(
+            n,
+            counter,
+            latch,
+            control,
+            &mut s.sched,
+            &mut s.ln,
+        );
+        Ok(())
+    }
+
+    /// Replace the CIA's ICR mask without raising or clearing the interrupt now.
+    fn seed_icr(&self, mask: u8) -> PyResult<()> {
+        self.cia()?.seed_icr(mask);
+        Ok(())
+    }
+
+    #[getter]
+    fn icr_mask(&self) -> PyResult<u8> {
+        Ok(self.cia()?.icr_mask())
+    }
+
+    /// Set the VIC's raster compare value as if latched long ago.
+    fn seed_raster_compare(&self, line: u16) -> PyResult<()> {
+        self.vic_only()?;
+        let s = &mut self.machine.get().core()?.s;
+        s.vic.seed_raster_compare(line, &mut s.sched, &mut s.ln);
+        Ok(())
+    }
+
+    /// Put the beam so the next VIC clock is `cycle` of `line`.
+    fn seed_beam(&self, line: i32, cycle: i32) -> PyResult<()> {
+        self.vic_only()?;
+        let s = &mut self.machine.get().core()?.s;
+        if !s.vic.seed_beam(line, cycle, &mut s.sched, &mut s.ln) {
+            return Err(PyValueError::new_err(format!(
+                "beam ({line}, {cycle}) is off the raster"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Chip {
+    fn cia(&self) -> PyResult<&mut moses_core::cia::Cia> {
+        if self.which == 0 {
+            return Err(PyValueError::new_err("not a CIA"));
+        }
+        Ok(&mut self.machine.get().core()?.s.cia[self.which as usize - 1])
+    }
+
+    fn vic_only(&self) -> PyResult<()> {
+        if self.which != 0 {
+            return Err(PyValueError::new_err("not the VIC"));
+        }
+        Ok(())
     }
 }
 

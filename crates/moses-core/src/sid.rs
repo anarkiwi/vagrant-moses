@@ -82,6 +82,20 @@ impl SidState {
         Some(self.bus)
     }
 
+    /// This state with empty write logs: the bus value and register values carry over.
+    pub fn fork(&self) -> Self {
+        SidState {
+            ttl_model: self.ttl_model,
+            writes: Vec::new(),
+            rows: Vec::new(),
+            keep_rows: self.keep_rows,
+            last: self.last,
+            bus: self.bus,
+            ttl: self.ttl,
+            clock: self.clock,
+        }
+    }
+
     /// The byte the chip drove for a readable register.
     pub fn settle(&mut self, cycle: i64, value: u8) {
         self.age(cycle);
@@ -97,9 +111,15 @@ pub struct SidShared(UnsafeCell<SidState>);
 unsafe impl Sync for SidShared {}
 unsafe impl Send for SidShared {}
 
+impl From<SidState> for SidShared {
+    fn from(state: SidState) -> Self {
+        SidShared(UnsafeCell::new(state))
+    }
+}
+
 impl SidShared {
     pub fn new(is_8580: bool) -> Self {
-        SidShared(UnsafeCell::new(SidState::new(is_8580)))
+        SidState::new(is_8580).into()
     }
 
     /// # Safety
@@ -131,6 +151,18 @@ mod tests {
         s.settle(5, 0x55);
         assert_eq!(s.peek(6, 0x1F), Some(0x55));
         assert_eq!(s.peek(5 + BUS_TTL_8580, 0), Some(0));
+    }
+
+    #[test]
+    fn fork_keeps_the_bus_and_drops_the_logs() {
+        let mut s = SidState::new(false);
+        s.write(10, 3, 0xAB);
+        let mut f = s.fork();
+        assert!(f.writes.is_empty() && f.rows.is_empty());
+        assert_eq!(f.last, s.last);
+        assert_eq!(f.peek(11, 0), s.peek(11, 0));
+        f.write(12, 3, 0xAC);
+        assert_eq!(s.writes.len(), 1);
     }
 
     #[test]
