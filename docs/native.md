@@ -41,6 +41,12 @@ collected. A numpy array over a view is not visited (numpy arrays are not GC con
 owner holding one and handing the machine a hook bound to itself is a cycle the GC cannot
 see, so such a hook holds its owner weakly.
 
+The chip views (`machine.vic`, `cia1`, `cia2`) read the registers, `raster_y`,
+`line_cycle`, `irq_flags`, `irq_mask`, `timer(n)` and `icr_mask`, and carry the `seed_*`
+setters; `keymatrix`, `set_key` and `release_all` live on the machine. They behave as the
+Python machine's (`docs/c64.md`, Keyboard matrix and chip-state seeding); a CIA call on the
+native VIC view, or the reverse, raises `ValueError` (the Python chips lack the method).
+
 ## NativeSid
 
 `NativeSid(model, on_read, rows=True)` (`"6581"` or `"8580"`) in `Machine(sids={io_base: dev})` keeps a

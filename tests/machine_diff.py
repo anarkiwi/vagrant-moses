@@ -1,7 +1,8 @@
 """Run one random program on both machine backends and report the first divergence.
 
 The program is byte soup over every non-JAM opcode with CIA timers, a raster IRQ,
-sprite DMA and bank switching set up, a trap and a SID that logs. Both backends are
+sprite DMA, held keys on CIA 1's matrix and bank switching set up, a trap and a SID
+that logs. Both backends are
 observed per instruction (cycle, pc, registers, port), plus their events, SID writes
 and trap calls. Comparison ends at the first instruction whose fetch has a side effect (see
 :func:`_risky`): the Python engine re-reads fetched bytes by its cache state.
@@ -100,7 +101,8 @@ class Run(NamedTuple):
 
 
 def program(seed: int):
-    """``(ntsc, cia_new, ram image writes, watch set)`` of a random program."""
+    """``(ntsc, cia_new, ram image writes, watch set, keyboard matrix)`` of a random
+    program."""
     rng = random.Random(seed)
     soup, starts = bytearray(), []
     while len(soup) < SOUP_LEN:
@@ -161,6 +163,12 @@ def program(seed: int):
   STA $DC0E
   LDA #${rng.choice([0x11, 0x41, 0x01, 0x59]):02X}
   STA $DC0F
+  LDA #${rng.randrange(256):02X}
+  STA $DC02
+  LDA #${rng.randrange(256):02X}
+  STA $DC00
+  LDX $DC01
+  LDY $DC00
   LDA #$81
   STA $DD0D
   LDA #$21
@@ -223,7 +231,8 @@ def program(seed: int):
     writes.append((SOUP, bytes(soup)))
     writes.append((0xFFFA, bytes((RAM_HANDLER & 0xFF, RAM_HANDLER >> 8)) * 3))
     watch = frozenset(rng.sample(starts, 6))
-    return bool(rng.getrandbits(1)), bool(rng.getrandbits(1)), writes, watch
+    keys = bytes(rng.randrange(256) & rng.randrange(256) for _ in range(8))
+    return bool(rng.getrandbits(1)), bool(rng.getrandbits(1)), writes, watch, keys
 
 
 def _snapshot(trace, machine):
@@ -249,7 +258,7 @@ def run(seed: int, cycles: int, backend: str, logged: bool = False) -> Run:
     ``logged`` puts a NativeSid in front of the chip: the pure-Python one on the Python
     machine, the native one on the native machine.
     """
-    ntsc, cia_new, writes, watch = program(seed)
+    ntsc, cia_new, writes, watch, keys = program(seed)
     trace, traps, sid = array("q"), [], Sid()
     dev = sid
     if logged:
@@ -302,6 +311,7 @@ def run(seed: int, cycles: int, backend: str, logged: bool = False) -> Run:
         machine.ram[lo:hi] = (SLED * ((hi - lo) // 3 + 1))[: hi - lo]
     for org, data in writes:
         machine.ram[org : org + len(data)] = data
+    machine.keymatrix = keys
     start = machine.reset(0x0800, boot_cycle(ntsc))
     try:
         machine.run(start + cycles)

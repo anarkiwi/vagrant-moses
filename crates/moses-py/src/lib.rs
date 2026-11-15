@@ -649,6 +649,43 @@ impl Machine {
         }
     }
 
+    /// CIA 1's keyboard matrix: byte `row` (PA line) has bit `col` (PB line) set per key held.
+    #[getter]
+    fn keymatrix<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        Ok(PyBytes::new(py, &self.core()?.s.cia[0].keys))
+    }
+
+    #[setter]
+    fn set_keymatrix(&self, rows: &Bound<'_, PyAny>) -> PyResult<()> {
+        let rows: [u8; 8] = octets(rows)?
+            .try_into()
+            .map_err(|_| PyValueError::new_err("the keyboard matrix has 8 rows"))?;
+        self.core()?.s.cia[0].keys = rows;
+        Ok(())
+    }
+
+    /// Hold (`down`) or release the key at PA line `row`, PB line `col`.
+    fn set_key(&self, row: i64, col: i64, down: bool) -> PyResult<()> {
+        if !(0..8).contains(&row) || !(0..8).contains(&col) {
+            return Err(PyValueError::new_err(format!(
+                "key ({row}, {col}) is off the matrix"
+            )));
+        }
+        let keys = &mut self.core()?.s.cia[0].keys[row as usize];
+        *keys = if down {
+            *keys | 1 << col
+        } else {
+            *keys & !(1 << col)
+        };
+        Ok(())
+    }
+
+    /// Release every key.
+    fn release_all(&self) -> PyResult<()> {
+        self.core()?.s.cia[0].keys = [0; 8];
+        Ok(())
+    }
+
     #[getter]
     fn watch(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match &self.core()?.watch {
@@ -1622,7 +1659,8 @@ registers!(
     (sp, set_sp, sp, u8, 0xFF)
 );
 
-/// Read-only view of a chip's registers and beam/timer state (`machine.vic`, `cia1`, `cia2`).
+/// View of a chip's registers and beam/timer state (`machine.vic`, `cia1`, `cia2`), with
+/// the `seed_*` setters that align it with a live machine.
 #[pyclass(module = "vagrant_moses._core", name = "Chip", frozen)]
 pub struct Chip {
     machine: Py<Machine>,
@@ -1672,6 +1710,70 @@ impl Chip {
         }
         let t = &self.machine.get().core()?.s.cia[self.which as usize - 1].t[n];
         Ok((t.timer, t.latch))
+    }
+
+    /// Set CIA timer `n`'s counter, latch and control register as if long running.
+    fn seed_timer(&self, n: usize, counter: u16, latch: u16, control: u8) -> PyResult<()> {
+        if self.which == 0 || n > 1 {
+            return Err(PyValueError::new_err("a CIA has timers 0 and 1"));
+        }
+        let s = &mut self.machine.get().core()?.s;
+        s.cia[self.which as usize - 1].seed_timer(
+            n,
+            counter,
+            latch,
+            control,
+            &mut s.sched,
+            &mut s.ln,
+        );
+        Ok(())
+    }
+
+    /// Replace the CIA's ICR mask without raising or clearing the interrupt now.
+    fn seed_icr(&self, mask: u8) -> PyResult<()> {
+        self.cia()?.seed_icr(mask);
+        Ok(())
+    }
+
+    #[getter]
+    fn icr_mask(&self) -> PyResult<u8> {
+        Ok(self.cia()?.icr_mask())
+    }
+
+    /// Set the VIC's raster compare value as if latched long ago.
+    fn seed_raster_compare(&self, line: u16) -> PyResult<()> {
+        self.vic_only()?;
+        let s = &mut self.machine.get().core()?.s;
+        s.vic.seed_raster_compare(line, &mut s.sched, &mut s.ln);
+        Ok(())
+    }
+
+    /// Put the beam so the next VIC clock is `cycle` of `line`.
+    fn seed_beam(&self, line: i32, cycle: i32) -> PyResult<()> {
+        self.vic_only()?;
+        let s = &mut self.machine.get().core()?.s;
+        if !s.vic.seed_beam(line, cycle, &mut s.sched, &mut s.ln) {
+            return Err(PyValueError::new_err(format!(
+                "beam ({line}, {cycle}) is off the raster"
+            )));
+        }
+        Ok(())
+    }
+}
+
+impl Chip {
+    fn cia(&self) -> PyResult<&mut moses_core::cia::Cia> {
+        if self.which == 0 {
+            return Err(PyValueError::new_err("not a CIA"));
+        }
+        Ok(&mut self.machine.get().core()?.s.cia[self.which as usize - 1])
+    }
+
+    fn vic_only(&self) -> PyResult<()> {
+        if self.which != 0 {
+            return Err(PyValueError::new_err("not the VIC"));
+        }
+        Ok(())
     }
 }
 

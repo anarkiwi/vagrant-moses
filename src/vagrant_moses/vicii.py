@@ -13,7 +13,7 @@ from .eventsched import PHI1, Event, Scheduler
 from .memmap import NTSC, PAL
 
 FIRST_DMA_LINE, LAST_DMA_LINE = 0x30, 0xF7
-_FETCH_CYCLE, _TEXT_COLS = 11, 40
+_FETCH_CYCLE, _TEXT_COLS, _BA_END = 11, 40, 54
 _IRQ_RASTER = 1
 PAL_GEOMETRY, NTSC_GEOMETRY = PAL.geometry, NTSC.geometry
 
@@ -112,6 +112,40 @@ class Vic:
 
     def _compare(self) -> int:
         return self.regs[0x12] | (self.regs[0x11] & 0x80) << 1
+
+    def seed_raster_compare(self, line: int) -> None:
+        """Set the raster compare value (``$D012`` and ``$D011`` bit 7) as if latched
+        long ago: a beam already on ``line`` raises nothing until the next match."""
+        self.sync()
+        self.regs[0x12] = line & 0xFF
+        self.regs[0x11] = self.regs[0x11] & 0x7F | (line >> 1 & 0x80)
+        self.raster_cond = self.raster_y == self._compare()
+
+    def seed_beam(self, line: int, cycle: int) -> None:
+        """Put the beam so the next VIC clock (the next PHI1) is ``cycle`` of ``line``.
+
+        Badline state follows ``$D011`` (DEN and YSCROLL as written) and BA is set
+        as the line has it after the previous cycle; sprite DMA is not changed, and
+        the compare matching the current line raises nothing.
+        """
+        if not (0 <= line < self.max_rasters and 0 <= cycle < self.cycles_per_line):
+            raise ValueError(f"beam ({line}, {cycle}) is off the raster")
+        sched = self.sched
+        for event in (self.event, self.edge_event, self.badline_event):
+            sched.cancel(event)
+        line, cycle = (
+            (line, cycle - 1) if cycle else (line - 1, self.cycles_per_line - 1)
+        )
+        self.vblanking = line == cycle == 0
+        y = self.raster_y = (
+            self.max_rasters - 1 if self.vblanking else line % self.max_rasters
+        )
+        self.line_cycle, self.raster_clk = cycle, ((sched.now + 1) >> 1) - 1
+        self.bad_lines_enabled = self._den() and FIRST_DMA_LINE <= y <= LAST_DMA_LINE
+        self.bad_line = self._is_bad_line()
+        self.raster_cond = y == self._compare()
+        self.set_ba(not (self.bad_line and _FETCH_CYCLE <= cycle < _BA_END))
+        sched.schedule(self.event, 0, PHI1)
 
     def _edge(self) -> None:
         old, self.raster_cond = self.raster_cond, self.raster_y == self._compare()

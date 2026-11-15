@@ -37,6 +37,7 @@ machine = Machine(reu=512)                               # with a 1750 REU at $D
 machine = Machine(roms={0xE000: kernal})                 # a real KERNAL, ROM-less elsewhere
 machine.ram[0x1000:0x1000 + len(code)] = code
 machine.run(machine.reset(0x1000) + 985248)              # one PAL second
+machine.set_key(1, 2, True)                              # hold A (PA1/PB2, VICE keyarr order)
 ```
 
 ```python

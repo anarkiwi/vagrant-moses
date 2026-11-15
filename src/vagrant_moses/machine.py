@@ -328,6 +328,32 @@ class Machine(Bus):
         """The machine's current cycle."""
         return self.t
 
+    # --- keyboard --------------------------------------------------------------
+
+    @property
+    def keymatrix(self) -> bytes:
+        """CIA 1's keyboard matrix: byte ``row`` (PA line) has bit ``col`` (PB line)
+        set for each key held, as VICE's ``keyarr``."""
+        return bytes(self.cia1.keys)
+
+    @keymatrix.setter
+    def keymatrix(self, rows) -> None:
+        rows = bytes(rows)
+        if len(rows) != 8:
+            raise ValueError("the keyboard matrix has 8 rows")
+        self.cia1.keys[:] = rows
+
+    def set_key(self, row: int, col: int, down: bool) -> None:
+        """Hold (``down``) or release the key at PA line ``row``, PB line ``col``."""
+        if not (0 <= row < 8 and 0 <= col < 8):
+            raise ValueError(f"key ({row}, {col}) is off the matrix")
+        keys = self.cia1.keys
+        keys[row] = keys[row] | 1 << col if down else keys[row] & ~(1 << col)
+
+    def release_all(self) -> None:
+        """Release every key."""
+        self.cia1.keys[:] = bytes(8)
+
     # --- I/O page --------------------------------------------------------------
 
     def __setitem__(self, addr: int, value: int) -> None:

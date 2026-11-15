@@ -1,7 +1,9 @@
 //! The 6526/8521 CIA timers and interrupt logic as libsidplayfp models them.
 //!
 //! A port of `timer.cpp`, `interrupt.cpp` and `mos652x.cpp` (VICE's `ciatimer`
-//! state machine). TOD and the serial port are not modelled.
+//! state machine). TOD and the serial port are not modelled. [`Cia::keys`] is the
+//! keyboard matrix across the ports (CIA 1): row `r` is PA line `r`, column `c` PB
+//! line `c`, as VICE's `keyarr`.
 
 use crate::lines::{Lines, CIA};
 use crate::sched::{
@@ -34,6 +36,7 @@ const DDRB: usize = 3;
 const ICR: usize = 13;
 const CRA: usize = 14;
 const CRB: usize = 15;
+const TAL: usize = 4;
 
 /// One CIA timer: the cycle-exact count/load/one-shot pipeline.
 #[derive(Clone)]
@@ -71,6 +74,21 @@ impl Timer {
         self.last_control = 0;
         self.pause = 0;
         s.schedule(self.event, 1, PHI1);
+    }
+
+    /// Counter, latch and control as a timer long in that mode (the caller syncs first).
+    fn seed(&mut self, counter: u16, latch: u16, cr: u8) {
+        self.timer = counter;
+        self.latch = latch;
+        let mut state = (cr as u32 & (CR_MASK & !CR_FLOAD)) ^ PHI2IN;
+        if state & (START | PHI2IN) == START | PHI2IN {
+            state |= COUNT2 | COUNT3;
+        }
+        if state & CR_ONESHOT != 0 {
+            state |= ONESHOT0 | ONESHOT;
+        }
+        self.state = state;
+        self.last_control = cr;
     }
 
     fn set_control(&mut self, cr: u8) {
@@ -173,6 +191,8 @@ struct Source {
 pub struct Cia {
     pub regs: [u8; 16],
     pub t: [Timer; 2],
+    /// Held keys: byte `row` has bit `col` set (see the module docs).
+    pub keys: [u8; 8],
     src: Source,
     base: u8,
     nmi: bool,
@@ -188,6 +208,7 @@ impl Cia {
                 Timer::new(base + C_TIMER, base + C_SKIP),
                 Timer::new(base + C_TIMER + 2, base + C_SKIP + 2),
             ],
+            keys: [0; 8],
             src: Source {
                 new,
                 last_clear: 0,
@@ -398,8 +419,24 @@ impl Cia {
 
     // --- registers ---------------------------------------------------------
 
+    /// Port `n`'s pins: its output, pulled low through held keys by the other port.
+    fn port(&self, n: usize) -> u8 {
+        let mut data = self.regs[n] | !self.regs[DDRA + n];
+        if self.keys != [0; 8] {
+            let low = !self.regs[1 - n] & self.regs[DDRB - n];
+            for (r, &cols) in self.keys.iter().enumerate() {
+                if n == PRB && low >> r & 1 != 0 {
+                    data &= !cols;
+                } else if n == PRA && cols & low != 0 {
+                    data &= !(1 << r);
+                }
+            }
+        }
+        data
+    }
+
     fn port_b(&self) -> u8 {
-        let mut data = self.regs[PRB] | !self.regs[DDRB];
+        let mut data = self.port(PRB);
         if self.regs[CRA] & 0x02 != 0 {
             data = data & 0xBF
                 | if self.t[0].pb(self.regs[CRA]) {
@@ -427,7 +464,7 @@ impl Cia {
             self.wake(i, s);
         }
         match addr {
-            PRA => self.regs[PRA] | !self.regs[DDRA],
+            PRA => self.port(PRA),
             PRB => self.port_b(),
             4..=7 => {
                 let t = &self.t[(addr >= 6) as usize];
@@ -440,6 +477,40 @@ impl Cia {
             }
             _ => self.regs[addr],
         }
+    }
+
+    /// Set timer `i`'s counter, latch and control register as if long running: the
+    /// counter is the value now and a started timer counts from the next PHI1. Force
+    /// load (bit 4) is ignored and the ICR untouched.
+    pub fn seed_timer(
+        &mut self,
+        i: usize,
+        counter: u16,
+        latch: u16,
+        control: u8,
+        s: &mut Sched,
+        ln: &mut Lines,
+    ) {
+        self.sync(i, s, ln);
+        self.regs[CRA + i] = control & 0xEF;
+        self.regs[TAL + 2 * i..TAL + 2 * i + 2].copy_from_slice(&latch.to_le_bytes());
+        let cr = if i == 1 {
+            control | (control & 0x40) >> 1
+        } else {
+            control
+        };
+        self.t[i].seed(counter, latch, cr);
+        self.wake(i, s);
+    }
+
+    /// Replace the ICR mask without raising or clearing the interrupt now.
+    pub fn seed_icr(&mut self, mask: u8) {
+        self.src.icr = mask & 0x7F;
+    }
+
+    /// The ICR mask.
+    pub fn icr_mask(&self) -> u8 {
+        self.src.icr
     }
 
     /// A CPU write of `data` to register `addr`.
