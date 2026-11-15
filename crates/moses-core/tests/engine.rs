@@ -387,12 +387,63 @@ fn a_program_runs_to_pcs_counts_the_marker_and_forks_agree() {
         .map(|i| if i % 3 == 0 { &spin } else { &p })
         .cloned()
         .collect();
-    let one = prog::run_forks(&c, &progs, 1, false, |_| Log::default());
-    let many = prog::run_forks(&c, &progs, 5, true, |_| Log::default());
+    let one = prog::run_forks(&mut c, &progs, 1, false, |_| Log::default());
+    let many = prog::run_forks(&mut c, &progs, 5, true, |_| Log::default());
     assert_eq!(c.t, t);
     for ((a, _, _), (b, _, f)) in one.iter().zip(&many) {
         assert_eq!(a, b);
         assert_eq!(f.as_ref().unwrap().t, a.cycle);
     }
     assert!(Prog::new(vec![Op::Jmp(2)], 1, None, 1).is_none());
+}
+
+#[test]
+fn segments_key_on_what_they_read_and_forks_fold_into_the_base() {
+    use moses_core::prog::{self, Op, Prog, Src};
+    use moses_core::seg::{Segs, END_IO, END_PC};
+    use moses_core::Watch;
+    // $1000: LDA $2000 / STA $2001 / LDA $D020 / JMP $1000
+    let code = [
+        0xAD, 0x00, 0x20, 0x8D, 0x01, 0x20, 0xAD, 0x20, 0xD0, 0x4C, 0x00, 0x10,
+    ];
+    let keys = |byte: u8, poke: u16| {
+        let mut c = core(&[(0x1000, &code), (0x2000, &[byte])]);
+        let mut host = Log::default();
+        c.reset(&mut host, 0x1000, 2000);
+        c.poke(poke, 0x77);
+        c.s.seg = Some(Box::new(Segs::new(64, None, false)));
+        c.run(&mut host, 4000);
+        let g = c.s.seg.as_mut().unwrap();
+        let mut k: Vec<_> = g.table().keys().copied().collect();
+        k.sort_unstable_by_key(|k| (k.entry, k.reads, k.n));
+        (k, g.summary(4))
+    };
+    let (base, s) = keys(1, 0x3000);
+    assert_eq!(s.tot.segs[END_IO], s.tot.segs.iter().sum::<u64>() - 1);
+    assert_eq!(s.tot.cycles[END_IO], 11 * s.tot.segs[END_IO] - 3);
+    assert_eq!(s.tot.conflicts, 0);
+    assert_eq!(keys(1, 0x2001).0, base);
+    assert_ne!(keys(2, 0x3000).0, base);
+
+    let mut c = core(&[(0x1000, &code)]);
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    let pcs = Arc::new([0x1000u16].into_iter().collect());
+    c.s.seg = Some(Box::new(Segs::new(64, Some(pcs), false)));
+    let run = Op::Run {
+        watch: Watch::All,
+        target: Watch::All,
+        n: Src::Imm(40),
+        here: false,
+    };
+    let p = Arc::new(Prog::new(vec![run], 1000, None, 10).unwrap());
+    prog::run_forks(&mut c, &[Arc::clone(&p), p], 2, false, |_| Log::default());
+    let s = c.s.seg.as_mut().unwrap().summary(4);
+    assert_eq!((s.batches, s.tot.forks), (1, 2));
+    assert_eq!(s.tot.segs[END_PC], 2 * 9);
+    // Per fork: the first [LDA, STA] from reset, nine more and nine [JMP].
+    let own = 8 * 8 + 8 * 3;
+    assert_eq!(s.tot.saved, [2 * own, 2 * own + 8 + 8 + 3]);
+    assert_eq!((s.global, s.distinct), (s.tot.saved[1], 3));
+    assert_eq!(s.top[0].first, 1 << 32);
 }

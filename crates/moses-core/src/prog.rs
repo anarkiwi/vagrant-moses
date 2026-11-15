@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use crate::machine::{Core, Watch};
+use crate::seg::Batch;
 use crate::sys::{port_read, Host, Sys, IO};
 
 /// An operand: a register or an immediate.
@@ -231,6 +232,9 @@ impl<H: Host> Host for Driver<'_, H> {
     }
     fn decode(&mut self, _core: &mut Core) {}
     fn port_write(&mut self, _core: &mut Core) {}
+    fn trap_writes(&self) -> bool {
+        false
+    }
 }
 
 /// Run `prog` on `core`: the trap, decode and port hooks and `arm_at` are set aside and
@@ -394,8 +398,10 @@ fn key(core: &mut Core, row: u8, col: u8, down: bool) {
 
 /// Each program on its own fork of `base`, on `threads` threads, in program order.
 /// `host(i)` is the host fork `i` runs with; `keep` returns each fork after its program.
+/// A segment profiler armed on `base` takes in the forks' segments as one batch; a kept
+/// fork's profiler starts afresh.
 pub fn run_forks<H: Host + Send, F: Fn(usize) -> H + Sync>(
-    base: &Core,
+    base: &mut Core,
     progs: &[Arc<Prog>],
     threads: usize,
     keep: bool,
@@ -403,29 +409,47 @@ pub fn run_forks<H: Host + Send, F: Fn(usize) -> H + Sync>(
 ) -> Vec<(Outcome, H, Option<Core>)> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let next = AtomicUsize::new(0);
+    let batch = base.s.seg.as_ref().map(|g| g.next_batch());
+    let shared: &Core = base;
     let work = || {
-        let mut done = Vec::new();
+        let (mut done, mut part) = (Vec::new(), Batch::default());
         loop {
             let i = next.fetch_add(1, Ordering::Relaxed);
             let Some(prog) = progs.get(i) else {
-                return done;
+                return (done, part);
             };
-            let mut core = base
+            let mut core = shared
                 .fork()
                 .expect("forks are refused while the recorder is armed");
             core.bare();
+            if let (Some(g), Some(b)) = (core.s.seg.as_deref_mut(), batch) {
+                g.src = b << 32 | i as u64;
+            }
             let mut h = host(i);
             let o = run(&mut core, &mut h, prog);
+            if let Some(g) = core.s.seg.take() {
+                if keep {
+                    core.s.seg = Some(Box::new(g.spawn()));
+                }
+                part.fold(*g);
+            }
             done.push((i, o, h, keep.then_some(core)));
         }
     };
-    let mut all: Vec<_> = std::thread::scope(|s| {
+    let (mut all, total) = std::thread::scope(|s| {
         let workers: Vec<_> = (0..threads.max(1)).map(|_| s.spawn(work)).collect();
         workers
             .into_iter()
-            .flat_map(|w| w.join().expect("a fork's thread panicked"))
-            .collect()
+            .fold((Vec::new(), Batch::default()), |(mut all, mut total), w| {
+                let (done, part) = w.join().expect("a fork's thread panicked");
+                all.extend(done);
+                total.join(part);
+                (all, total)
+            })
     });
+    if let Some(g) = base.s.seg.as_deref_mut() {
+        g.absorb(total);
+    }
     all.sort_unstable_by_key(|r| r.0);
     all.into_iter().map(|(_, o, h, c)| (o, h, c)).collect()
 }

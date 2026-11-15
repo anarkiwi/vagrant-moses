@@ -100,6 +100,20 @@ impl Lines {
         }
     }
 
+    /// What the scheduler's events can change of the CPU's view: the IRQ pin, NMI and `ic`.
+    #[inline(always)]
+    pub fn cpu_view(&self) -> u64 {
+        self.ic as u32 as u64 | (self.pin as u64) << 32 | (self.nmi as u64) << 33
+    }
+
+    /// The segment profiler's line bits: IRQ pin, NMI, I flag and a pending interrupt.
+    pub fn seg_bits(&self) -> u64 {
+        self.pin as u64
+            | (self.nmi as u64) << 1
+            | (self.iflag as u64) << 2
+            | ((self.ic != MAX) as u64) << 3
+    }
+
     pub fn set_ba(&mut self, state: bool) {
         self.rdy = state;
     }

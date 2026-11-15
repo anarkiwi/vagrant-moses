@@ -11,6 +11,7 @@ use crate::frames::{K_BRK, K_NONE};
 use crate::lines::{self, Lines, MAX};
 use crate::reu::Reu;
 use crate::sched::{Sched, PHI2};
+use crate::seg::{self, Profiled, END_EVENT, END_IRQ};
 use crate::smc;
 use crate::sys::{BusRef, Host, SidDev, Sys, RAM};
 use crate::vic::Vic;
@@ -175,6 +176,7 @@ impl Core {
             dma: false,
             rmw: false,
             rec: None,
+            seg: None,
         };
         s.remap();
         let mut layouts = cfg.layouts;
@@ -321,6 +323,18 @@ impl Core {
 
     /// Fetch the opcode at PC (`fetchNextOpcode`) and lay out its cycles.
     fn decode<H: Host>(&mut self, h: &mut H) {
+        let mut regs = None;
+        if H::SEG {
+            let pc = self.cpu.pc;
+            let trap = self.watch.contains(pc) || !self.armed && self.arm_pc == Some(pc);
+            let host = self.decode_set
+                || self.trap_set && trap && (self.s.rec.is_some() || h.trap_writes());
+            let r = seg::regs(&self.cpu);
+            if let Some(g) = self.s.seg.as_deref_mut() {
+                g.decode(r, pc, self.t, host);
+            }
+            regs = (!host).then_some(r);
+        }
         if self.decode_set {
             self.s.flush(h);
             h.decode(self);
@@ -364,7 +378,20 @@ impl Core {
                 r.retire(pc);
             }
         }
+        if H::SEG && self.s.seg.as_ref().is_some_and(|g| !g.open) && !self.stop {
+            let entry = regs.unwrap_or_else(|| seg::regs(&self.cpu))
+                | ((self.s.bits & 7) as u64) << 56
+                | self.s.ln.seg_bits() << 59;
+            if let Some(g) = self.s.seg.as_deref_mut() {
+                g.open(entry, self.t);
+            }
+        }
         let op = self.s.look(h, pc) as usize;
+        if H::SEG {
+            if let Some(g) = self.s.seg.as_deref_mut() {
+                g.op = op as u8;
+            }
+        }
         let l = &self.layouts[op];
         let (mode, branch) = (l.mode, l.branch);
         self.exec_at = l.exec_at;
@@ -412,6 +439,11 @@ impl Core {
     fn fetch<H: Host>(&mut self, h: &mut H) {
         let ln = &self.s.ln;
         if ln.ic != MAX && ln.cc > ln.ic + 2 {
+            if H::SEG {
+                if let Some(g) = self.s.seg.as_deref_mut() {
+                    g.interrupt(seg::regs(&self.cpu), self.t);
+                }
+            }
             self.s.look(h, self.cpu.pc);
             self.layout = BRK_LAYOUT;
             self.idx = 0;
@@ -462,10 +494,15 @@ impl Core {
         }
     }
 
-    fn push(&mut self, value: u8) {
+    fn push<H: Host>(&mut self, value: u8) {
         let addr = 0x100 | self.cpu.sp as usize;
         if let Some(r) = self.s.rec.as_deref_mut() {
             r.note(addr as u16, self.s.ram[addr], true);
+        }
+        if H::SEG {
+            if let Some(g) = self.s.seg.as_deref_mut() {
+                g.write(addr as u16, value);
+            }
         }
         self.s.ram[addr] = value;
         self.cpu.sp = self.cpu.sp.wrapping_sub(1);
@@ -554,9 +591,14 @@ impl Core {
                     self.cpu.pc = self.cpu.pc.wrapping_add(2);
                 }
             }
-            PUSHPCH => self.push((self.cpu.pc >> 8) as u8),
+            PUSHPCH => self.push::<H>((self.cpu.pc >> 8) as u8),
             LOWPC => {
-                self.push(self.cpu.pc as u8);
+                if H::SEG {
+                    if let Some(g) = self.s.seg.as_deref_mut() {
+                        g.cut(END_IRQ);
+                    }
+                }
+                self.push::<H>(self.cpu.pc as u8);
                 let nmi = self.s.ln.nmi;
                 self.vec_addr = if nmi { NMI_VECTOR } else { IRQ_VECTOR };
                 self.s.ln.nmi = false;
@@ -588,7 +630,7 @@ impl Core {
             }
             PUSHSR => {
                 let p = self.cpu.p() & !0x30 | if self.d1x1 { 0x20 } else { 0x30 };
-                self.push(p);
+                self.push::<H>(p);
             }
             VECLO => {
                 self.target = self.s.rd(h, self.vec_addr) as u16;
@@ -618,8 +660,17 @@ impl Core {
 
     /// Run the CPU and the chips up to cycle `limit`.
     pub fn run<H: Host>(&mut self, h: &mut H, limit: i64) {
+        if self.s.seg.is_some() {
+            self.cycles(&mut Profiled(h), limit);
+        } else {
+            self.cycles(h, limit);
+        }
+    }
+
+    fn cycles<H: Host>(&mut self, h: &mut H, limit: i64) {
         self.stop = false;
         let mut t = self.t;
+        let start = t;
         if t < limit {
             self.parked = false;
         }
@@ -627,12 +678,27 @@ impl Core {
             let t2 = t << 1;
             if self.s.sched.next <= t2 {
                 self.s.ln.cc = self.base + self.idx;
-                self.s.run_sched(t2);
+                if H::SEG {
+                    let view = self.s.ln.cpu_view();
+                    self.s.run_sched(t2);
+                    if self.s.ln.cpu_view() != view {
+                        if let Some(g) = self.s.seg.as_deref_mut() {
+                            g.cut(END_EVENT);
+                        }
+                    }
+                } else {
+                    self.s.run_sched(t2);
+                }
                 self.s.flush(h);
             }
             let kind = self.layouts[self.layout].ents[self.idx as usize];
             self.s.sched.now = t2 + 1;
             if kind >= R && (!self.s.ln.rdy || self.s.dma) {
+                if H::SEG {
+                    if let Some(g) = self.s.seg.as_deref_mut() {
+                        g.cut(END_EVENT);
+                    }
+                }
                 let mut go = false;
                 if self.s.dma {
                     self.s.ln.cc = self.base + self.idx;
@@ -660,6 +726,11 @@ impl Core {
             t += 1;
         }
         self.t = t;
+        if H::SEG {
+            if let Some(g) = self.s.seg.as_deref_mut() {
+                g.end_run(t - start);
+            }
+        }
     }
 
     fn step<H: Host>(&mut self, h: &mut H) {

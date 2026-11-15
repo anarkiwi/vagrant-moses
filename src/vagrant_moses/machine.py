@@ -796,6 +796,14 @@ class Machine(Bus):
 
         return run_forks_python(self, programs, keep)
 
+    def profile_segments(self, *_args, **_kwargs):
+        """The segment profiler is native only (``docs/native.md``, Segment profile)."""
+        raise NotImplementedError("the segment profiler is native only")
+
+    def segment_profile(self, *_args, **_kwargs):
+        """The segment profiler is native only (``docs/native.md``, Segment profile)."""
+        raise NotImplementedError("the segment profiler is native only")
+
 
 __all__ = [
     "NATIVE",
