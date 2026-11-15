@@ -19,6 +19,7 @@ use moses_core::lines::NAMES;
 use moses_core::machine::{DA, M_RTS};
 use moses_core::prog::{self, Alu, Cond, Op, Prog, Src, STATUSES};
 use moses_core::reu::{geometry, REGS, SIZES};
+use moses_core::seg::{Segs, EARLY, ENDS, MAX_CAP};
 use moses_core::smc::{Budget, STOPS, STOP_JAM, STOP_NONE};
 use moses_core::trace::{Facts, Scan, Tracer};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
@@ -941,8 +942,8 @@ impl Machine {
         let devs = &me.devs[..];
         let done = py.detach(|| {
             let base = base;
-            // SAFETY: as above; forks only read the base.
-            let base = unsafe { &*base.0 };
+            // SAFETY: as above; forks only read the base, whose profiler takes in the batch.
+            let base = unsafe { &mut *base.0 };
             prog::run_forks(base, &codes, threads, keep, |_| PyHost {
                 devs,
                 sink: None,
@@ -971,6 +972,90 @@ impl Machine {
             .into_pyobject(py)?
             .into_any()
             .unbind())
+    }
+
+    /// Arm the segment profiler afresh (`docs/native.md`, Segment profile): segments of at
+    /// most `max_insns` instructions, also ended before a pc in `boundaries` or, with `calls`,
+    /// after a `JSR`, `RTS` or `RTI`; `enabled=False` disarms it. Forks and clones inherit it.
+    #[pyo3(signature = (boundaries=None, max_insns=256, calls=false, enabled=true))]
+    fn profile_segments(
+        &self,
+        boundaries: Option<&Bound<'_, PyAny>>,
+        max_insns: u32,
+        calls: bool,
+        enabled: bool,
+    ) -> PyResult<()> {
+        if !(1..=MAX_CAP).contains(&max_insns) {
+            return Err(PyValueError::new_err(format!(
+                "max_insns must be 1 to {MAX_CAP}"
+            )));
+        }
+        let pcs = boundaries.map(pcset).transpose()?.map(Arc::new);
+        self.core()?.s.seg = enabled.then(|| Box::new(Segs::new(max_insns, pcs, calls)));
+        Ok(())
+    }
+
+    /// The segment profile so far (`None` when not armed), with the `top` entry pcs by the
+    /// cycles a shared cache would save.
+    #[pyo3(signature = (top=10))]
+    fn segment_profile<'py>(
+        &self,
+        py: Python<'py>,
+        top: usize,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let Some(g) = self.core()?.s.seg.as_deref_mut() else {
+            return Ok(None);
+        };
+        let s = g.summary(top);
+        let t = &s.tot;
+        let d = PyDict::new(py);
+        let ends = PyDict::new(py);
+        for (i, name) in ENDS.iter().enumerate() {
+            ends.set_item(name, (t.segs[i], t.cycles[i]))?;
+        }
+        let saved = PyDict::new(py);
+        saved.set_item("machine", t.saved[0])?;
+        saved.set_item("batch", t.saved[1])?;
+        saved.set_item("global", s.global)?;
+        let lengths: Vec<_> = t
+            .hist
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h[0] > 0)
+            .map(|(b, h)| (1u64 << b, (2u64 << b) - 1, h[0], h[1]))
+            .collect();
+        let tops = s
+            .top
+            .iter()
+            .map(|e| {
+                let row = PyDict::new(py);
+                row.set_item("pc", e.pc)?;
+                row.set_item("keys", e.keys)?;
+                row.set_item("occurrences", e.n)?;
+                row.set_item("cycles", e.cycles)?;
+                row.set_item("saved", e.saved)?;
+                row.set_item("first", (e.first >> 32, e.first as u32))?;
+                Ok(row)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        d.set_item("cycles", t.run)?;
+        d.set_item("segments", t.segs.iter().sum::<u64>())?;
+        d.set_item("segment_cycles", t.cycles.iter().sum::<u64>())?;
+        d.set_item(
+            "early_cycles",
+            EARLY.iter().map(|&i| t.cycles[i]).sum::<u64>(),
+        )?;
+        d.set_item("instructions", t.insns)?;
+        d.set_item("distinct", s.distinct)?;
+        d.set_item("recurrent_cycles", s.recurrent)?;
+        d.set_item("saved", saved)?;
+        d.set_item("ends", ends)?;
+        d.set_item("lengths", lengths)?;
+        d.set_item("top", tops)?;
+        d.set_item("conflicts", t.conflicts)?;
+        d.set_item("batches", s.batches)?;
+        d.set_item("forks", t.forks)?;
+        Ok(Some(d))
     }
 
     /// Bring the chips to `cycle` (default: the power-on delay) and start the CPU at `entry`.

@@ -17,6 +17,7 @@ backend="native"|"python")` picks one, native when `_core` imports and the class
 | `tools/bench_machine.py` | Playroutine-shaped and SID-write-heavy benchmark of both backends, with no SID, a Python device or a `NativeSid`. |
 | `tools/thread_machines.py` | N machines on N threads against one (`--sid` for `NativeSid`). |
 | `tools/bench_forks.py` | `run_forks` forks/s and emulated frames/s by thread count. |
+| `tools/segment_profile.py` | The [segment profile](#segment-profile) of a `run_forks` workload and the profiler's overhead. |
 | `src/vagrant_moses/sid.py` | `PyNativeSid`, the pure-Python `NativeSid` the Python machine uses. |
 
 `moses-core` runs the 6510 on `jennings-core` (`Cpu::step` over a `Bus` implementation);
@@ -100,6 +101,8 @@ them, so a write through a view the caller holds never reaches another machine. 
   `on_read`, and empty write logs; a Python SID device object is shared by both machines.
 - The clone has no `on_event` sink (its events collect in `events`, which starts as a copy
   of the original's), no `on_io`, no trap, decode or port hook, and fresh views.
+- A [segment profiler](#segment-profile) is armed on the clone afresh, with the same
+  boundaries and nothing recorded.
 - It is refused with `RuntimeError` while the machine runs (also from its own hooks or
   sink) or while the SMC recorder is armed.
 
@@ -171,7 +174,105 @@ outcomes do not depend on the thread count or the scheduling. The SIDs must be `
 (a shared Python device would see the forks' writes interleaved): their `on_read` is called
 with the GIL re-acquired and is shared by the forks, so it must not depend on its call order.
 The Python machine runs the forks in turn on clones, the reference the native batch equals.
+A [segment profiler](#segment-profile) armed on `base` takes in the batch's segments.
 `tools/bench_forks.py` reports forks/s and emulated frames/s by thread count.
+
+## Segment profile
+
+`machine.profile_segments(boundaries=None, max_insns=256, calls=False)` arms a profiler on the
+native machine (`crates/moses-core/src/seg.rs`; the Python machine raises `NotImplementedError`)
+that cuts the CPU's work in every later `run`, `run_program` and `run_forks` into *segments*
+and counts each segment's key. It measures how much work a value-guarded replay cache could
+skip; nothing is replayed. Re-arming starts afresh, `enabled=False` disarms, and
+`segment_profile(top=10)` returns the summary (`None` when not armed).
+
+### Segments
+
+A segment opens at a decode (the CPU about to execute the instruction at `pc`) and closes at
+a later decode; its cycles run from one decode's cycle to the other's. It ends when:
+
+| end | at |
+|---|---|
+| `cap` | `max_insns` instructions (1 to 2^20) |
+| `pc` | a decode at a pc in `boundaries`, or with `calls` the decode after a `JSR`, `RTS` or `RTI` |
+| `host` | a decode where a hook that may change the machine runs: the decode hook, or a trap whose watch holds the pc (a driver program's trap only counts and stops, and is none) |
+| `run` | the end of the run: the segment closes at the last decode before it |
+| `io` | an instruction that reads or writes `$D000-$DFFF` with I/O mapped, or `$00/$01`, or writes `$FF00` with an REU attached |
+| `event` | an instruction in which the CPU stalled (BA low or an REU DMA at a read cycle) or a scheduler event changed the IRQ pin, NMI or the interrupt clock `ic` |
+| `irq` | an interrupt sequence starting after the instruction, or a BRK |
+
+`io`, `event` and `irq` (the *early* ends, `early_cycles`) and `run` close the segment at the
+previous decode: the instruction they happened in belongs to no segment, nor do interrupt
+sequences and the instruction a run resumes mid-way (a run op stops with an instruction
+decoded and not executed). Segment ends need no lookahead: the profiler notes the cut while
+the instruction runs and falls back to the state it kept at the previous decode.
+
+Why a replay would be exact. The run loop (`Core::cycles`) consults three things outside the
+CPU: `ln.rdy` and `s.dma` at a read cycle (a stall; else the cycle proceeds regardless of
+either), the interrupt lines at `fetch` and `decode` (`ic`, the pin, NMI, the I flag), and
+the scheduler, which only changes the CPU's world through those lines, BA and the chip
+registers. Inside a segment no read cycle stalled and no event changed the lines, so the
+cycle sequence is that of a machine with RDY high and the lines fixed at their entry state;
+the chips are reached only through I/O, which a segment holds none of, so they never see the
+CPU. Every byte the CPU consumes goes through the bus read (`Sys::read`: opcode and operand
+fetches, data, pointers, stack pulls, vectors, dummy reads), so given the entry state the
+reads determine the instructions, their cycles (page crosses, branches), the writes and the
+exit state; the beam position does not enter. The bank bits cannot change inside a segment
+(`$00/$01` are cut), so a write lands in the same place. `on_event` and `on_io` are taken
+to observe only: a sink that changes the machine mid-segment is outside the argument.
+
+### Key and effect
+
+The key is `(entry pc, A, X, Y, SP, P, bank bits, lines, read hash, read count)`: the lines are
+the IRQ pin, NMI, the I flag and a pending interrupt (`ic` set) at entry; the read hash runs
+over every `(address, value)` the segment read, fetches included, so self-modified code is a
+different key. The effect is `(write hash, exit registers, cycles)`, the write hash over every
+CPU write and push in order. Both hashes step `h = (h ^ (addr << 8 | value)) * K`, a bijection
+of the state per input, so streams differing in one element never collide. A key seen again
+with a different effect counts a `conflict`, which an exact definition keeps at 0.
+
+### Forks and scopes
+
+A fork (`clone`, each `run_forks` fork) is armed afresh with the same boundaries and records
+into its own table: `run_forks` folds each fork's table into its worker thread's, joins the
+workers' and takes the batch into the base's profile, all commutative sums and minima, so the
+summary does not depend on the thread count. Fork `i` of the `b`-th batch is source `(b, i)`;
+the profiled machine's own runs are `(0, 0)`. A kept fork is armed afresh.
+
+| field | value |
+|---|---|
+| `cycles` | cycles run while armed (forks included) |
+| `segments`, `segment_cycles`, `instructions` | segments recorded and their cycles and instructions |
+| `early_cycles` | cycles of segments with an early end |
+| `ends` | `{end: (segments, cycles)}` |
+| `lengths` | `(lo, hi, segments, cycles)` per power-of-two instruction count |
+| `distinct` | keys seen |
+| `saved` | `{"machine", "batch", "global"}`: cycles of the occurrences after a key's first in its source, in its batch (the machine's own runs are a batch), and anywhere: what a cache of that scope would skip |
+| `recurrent_cycles` | cycles of every occurrence of a key seen more than once |
+| `top` | the entry pcs by `saved["global"]`: `pc`, `keys`, `occurrences`, `cycles`, `saved`, `first` source |
+| `conflicts`, `batches`, `forks` | as above |
+
+### Overhead
+
+The profiler's feeds compile into a second instance of the run loop: `Core::run` dispatches to
+it through `seg::Profiled`, a host with `Host::SEG` set, only while a profiler is armed, so an
+unarmed machine pays one branch per `run`. Armed, a read or write costs a multiply, a decode a
+few stores, a segment a probe of a 256-slot direct-mapped write-back cache in front of its
+table. `tools/segment_profile.py` reports the overhead and the summary of `bench_forks`'
+`play` workload (`--workload keys`: the main loop reads the keyboard into the copy pointer, so
+forks diverge by key column), with `--max-insns`, `--calls` and `--boundaries`.
+
+### A replay cache on the same keys
+
+The key is the cache's guard and the effect its payload. Indexed by the entry state, a cached
+segment keeps its reads as `(address, value)` up to the first write of each address (later
+reads of it are the segment's own); a hit needs every such byte to hold that value under the
+entry bank bits, the next chip event that can reach the CPU (BA low at a read cycle, a line
+change) to lie after the segment's cycles, and no host hook due inside it. It then applies
+the writes (address to final value), the exit registers (with jennings' cycle and step
+counters advanced), runs the chips to the exit cycle and resumes at the exit decode. The
+profile's `saved` cycles are the hits such a cache would have had with every guard checked
+for free.
 
 ## Hooks
 
@@ -364,7 +465,8 @@ comparison at the first such fetch.
 `pytest` runs `tests/test_machine.py` on both backends and with each kind of SID,
 `tests/test_native.py` for the Python surface and hooks, `tests/test_sid.py` for `NativeSid`,
 `tests/test_clone.py` for `clone()` on both backends, `tests/test_program.py` for driver
-programs and `run_forks` on both backends, and six differential programs per SID kind.
+programs and `run_forks` on both backends, `tests/test_segments.py` for the segment profiler,
+and six differential programs per SID kind.
 `tools/diff_machines.py` also clones each program halfway on both backends and checks the clone
 ends as the original, and runs random driver programs alone and as forks on both backends. For the full gate:
 

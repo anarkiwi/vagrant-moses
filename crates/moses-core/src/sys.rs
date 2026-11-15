@@ -9,6 +9,7 @@ use crate::cia::Cia;
 use crate::lines::{Lines, REU};
 use crate::reu::{Port, Reu};
 use crate::sched::{Sched, E_BADLINE, E_CLEAR_INT, E_EDGE, E_VIC, PHI1};
+use crate::seg::{Segs, END_IO};
 use crate::sid::SidShared;
 use crate::smc::Recorder;
 use crate::vic::Vic;
@@ -33,12 +34,18 @@ pub enum SidDev {
 
 /// The Python side of the machine: SID devices, the event sink and the hooks.
 pub trait Host {
+    /// The run feeds the segment profiler ([`crate::seg::Profiled`]).
+    const SEG: bool = false;
     fn sid_read(&mut self, dev: usize, cycle: i64, reg: u8) -> u8;
     fn sid_write(&mut self, dev: usize, cycle: i64, reg: u8, value: u8);
     fn event(&mut self, cycle: i64, name: u8);
     fn trap(&mut self, core: &mut crate::Core) -> bool;
     fn decode(&mut self, core: &mut crate::Core);
     fn port_write(&mut self, core: &mut crate::Core);
+    /// The trap may change the machine (a driver program's only counts and stops).
+    fn trap_writes(&self) -> bool {
+        true
+    }
     /// An I/O access the CPU or a DMA made: `value` read from or written to `addr`.
     fn io(&mut self, _addr: u16, _value: u8, _write: bool) {}
     /// A callback failed: the run ends at the next cycle.
@@ -100,11 +107,14 @@ pub struct Sys {
     pub rmw: bool,
     /// The SMC recorder, when armed.
     pub rec: Option<Box<Recorder>>,
+    /// The segment profiler, when armed.
+    pub seg: Option<Box<Segs>>,
 }
 
 impl Sys {
     /// An independent copy while no SMC recorder is armed (else `None`). Each logged SID's
-    /// state is copied with empty write logs; host devices keep their index.
+    /// state is copied with empty write logs; host devices keep their index. A segment
+    /// profiler is armed afresh with the same boundaries.
     pub fn fork(&self) -> Option<Sys> {
         let Sys {
             sched,
@@ -131,6 +141,7 @@ impl Sys {
             dma,
             rmw,
             rec,
+            seg,
         } = self;
         if rec.is_some() {
             return None;
@@ -179,6 +190,7 @@ impl Sys {
             dma: *dma,
             rmw: *rmw,
             rec: None,
+            seg: seg.as_ref().map(|g| Box::new(g.spawn())),
         })
     }
 
@@ -396,9 +408,10 @@ impl Sys {
 
     #[inline(always)]
     fn read<H: Host, const OBS: bool>(&mut self, h: &mut H, addr: u16) -> u8 {
-        if addr > 1 {
+        let v = if addr > 1 {
             let k = self.map[(addr >> 12) as usize];
             if k == IO {
+                self.seg_cut::<H>();
                 if OBS {
                     self.io_read(h, addr)
                 } else {
@@ -407,10 +420,41 @@ impl Sys {
             } else {
                 self.image(k)[addr as usize]
             }
-        } else if addr != 0 {
-            port_read(self.port_dir, self.port_data)
         } else {
-            self.port_dir
+            self.seg_cut::<H>();
+            if addr != 0 {
+                port_read(self.port_dir, self.port_data)
+            } else {
+                self.port_dir
+            }
+        };
+        if H::SEG {
+            if let Some(g) = self.seg.as_deref_mut() {
+                g.read(addr, v);
+            }
+        }
+        v
+    }
+
+    #[inline(always)]
+    fn seg_cut<H: Host>(&mut self) {
+        if H::SEG {
+            if let Some(g) = self.seg.as_deref_mut() {
+                g.cut(END_IO);
+            }
+        }
+    }
+
+    /// A CPU write the profiler hashes, cut when it reaches I/O, the port or the REU's
+    /// `$FF00` trigger.
+    #[inline(always)]
+    pub fn seg_write(&mut self, addr: u16, value: u8) {
+        let io = self.io && addr >> 12 == 0xD || addr < 2 || addr == 0xFF00 && self.reu.is_some();
+        if let Some(g) = self.seg.as_deref_mut() {
+            g.write(addr, value);
+            if io {
+                g.cut(END_IO);
+            }
         }
     }
 
@@ -480,6 +524,9 @@ impl<H: Host> Bus for BusRef<'_, H> {
         let s = &mut *self.s;
         if let Some(r) = s.rec.as_deref_mut() {
             r.note(addr, s.ram[addr as usize], false);
+        }
+        if H::SEG {
+            s.seg_write(addr, v);
         }
         s.wr(addr, v)
     }

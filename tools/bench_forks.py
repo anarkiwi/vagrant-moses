@@ -26,10 +26,11 @@ from vagrant_moses.machine import NATIVE, boot_cycle
 from asm import assemble
 
 
-def base_machine(backend: str):
-    """The ``play`` workload, a tenth of a second in, with its events cleared."""
+def base_machine(backend: str, source: str = SOURCE):
+    """The ``play`` workload (or ``source`` as its main program), a tenth of a second in,
+    with its events cleared."""
     machine = Machine(backend=backend)
-    for org, src in ((ORG, SOURCE), (IRQ, HANDLER)):
+    for org, src in ((ORG, source), (IRQ, HANDLER)):
         code, _ = assemble(src, org)
         machine.ram[org : org + len(code)] = code
     machine.ram[TABLE : TABLE + 256] = bytes(range(256))
