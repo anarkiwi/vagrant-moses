@@ -128,6 +128,12 @@ impl SidShared {
     pub unsafe fn state(&self) -> &mut SidState {
         &mut *self.0.get()
     }
+
+    /// # Safety
+    /// No mutable reference to the state may be live or used while the result is.
+    pub unsafe fn view(&self) -> &SidState {
+        &*self.0.get()
+    }
 }
 
 #[cfg(test)]

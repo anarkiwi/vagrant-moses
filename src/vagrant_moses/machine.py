@@ -338,6 +338,8 @@ class Machine(Bus):
         self.on_io = on_io
         self._obs = None
         self._running = False
+        self.stop = False
+        self._parked = False
         self.colour = bytearray(0x400)
         self.seed = 3686734
         self.asserted = [False] * len(SOURCES)
@@ -710,9 +712,13 @@ class Machine(Bus):
             mpu.pc = (mpu.pc + 2) & 0xFFFF
 
     def run(self, limit: int) -> None:
-        """Run the CPU and the chips up to cycle ``limit``."""
+        """Run the CPU and the chips up to cycle ``limit``, or until something sets ``stop``
+        (the run then ends after the cycle that set it)."""
         if self._running:
             raise RuntimeError("the machine is already running")
+        self.stop = False
+        if self.t < limit:
+            self._parked = False
         self._obs, self._running = self.on_io, True
         try:
             self._run(limit)
@@ -731,7 +737,7 @@ class Machine(Bus):
     def _run(self, limit: int) -> None:
         sched = self.sched
         t = self.t
-        while t < limit and not self.jammed:
+        while t < limit and not self.jammed and not self.stop:
             t2 = t << 1
             if sched.next <= t2:
                 self.cc = self.base + self.idx
@@ -774,7 +780,21 @@ class Machine(Bus):
         mpu.sp, mpu.p, mpu.a, mpu.x, mpu.y = 0xFF, 0, 0, 0, 0
         self.target = entry
         self.ents, self.idx, self.base, self.cc = BRK_ENTRIES, 6, 0, 6
+        self._parked = False
         return cycle
+
+    def run_program(self, program):
+        """Run driver program ``program`` (:class:`~vagrant_moses.program.Program`) here."""
+        from .program import run  # pylint: disable=import-outside-toplevel
+
+        return run(self, program)
+
+    def run_forks(self, programs, threads: Optional[int] = None, keep: bool = False):
+        """:func:`~vagrant_moses.program.run_forks` on clones of this machine, in turn."""
+        del threads
+        from .program import run_forks_python  # pylint: disable=import-outside-toplevel
+
+        return run_forks_python(self, programs, keep)
 
 
 __all__ = [

@@ -6,6 +6,7 @@ pub mod cia;
 pub mod frames;
 pub mod lines;
 pub mod machine;
+pub mod prog;
 pub mod reu;
 pub mod sched;
 pub mod sid;

@@ -19,6 +19,7 @@ from jennings.opcodes import OPCODES
 from vagrant_moses import memmap as mm
 from vagrant_moses import machine as vm
 from vagrant_moses.machine import Machine, boot_cycle
+from vagrant_moses.program import Program, R
 from vagrant_moses.sid import PyNativeSid
 
 from asm import assemble
@@ -459,3 +460,87 @@ def compare(seed: int, cycles: int, logged: bool = False) -> Optional[str]:
     return first_divergence(
         run(seed, cycles, "python", logged), run(seed, cycles, "native", logged)
     )
+
+
+def _probe(seed: int, cycles: int):
+    """``(start, pcs decoded, cut)`` of program ``seed`` run natively with no trap: the
+    pcs in decode order up to ``cut``, the cycle of its first risky fetch (or the end).
+    """
+    machine = _machine(seed, "native", vm.NativeSid("6581", Sid().read), None)
+    start = load(machine, seed)
+    pcs = []
+
+    def decode(m):
+        if _risky(m.mpu.pc):
+            m.stop = True
+        else:
+            pcs.append(m.mpu.pc)
+
+    machine.set_decode_hook(decode)
+    machine.run(start + cycles)
+    return start, pcs, machine.t - 1 if machine.stop else machine.t
+
+
+def random_program(seed: int, budget: int, pcs) -> Program:
+    """A random driver program that only watches: run ops to ``pcs`` (decoded in that
+    order), loads of every kind, register arithmetic, branches and outputs."""
+    rng = random.Random(seed * 7919 + budget)
+    p = Program(budget, marker=rng.choice(pcs))
+    for i in range(rng.randrange(4, 24)):
+        kind = rng.randrange(9)
+        if kind == 0:
+            p.run_to(
+                rng.sample(pcs, min(len(pcs), rng.randrange(1, 4))), rng.random() < 0.5
+            )
+        elif kind == 1:
+            p.count_to(rng.choice(pcs), rng.randrange(4))
+        elif kind == 2:
+            p.step(rng.randrange(1, 300))
+        elif kind == 3:
+            addr = rng.choice((rng.randrange(0x10000), 0xD000 | rng.randrange(0x400)))
+            getattr(p, rng.choice(("ld", "ldr")))(R[rng.randrange(16)], addr)
+        elif kind == 4:
+            p.ldio(
+                R[rng.randrange(16)],
+                rng.choice((0xD000, 0xD800, 0xDC00, 0xDD00)) | rng.randrange(0x100),
+            )
+        elif kind == 5:
+            alu = rng.choice(("add", "sub", "add8", "sub8", "xor", "shl", "shr", "mov"))
+            src = R[rng.randrange(16)] if rng.random() < 0.5 else rng.randrange(1 << 32)
+            getattr(p, alu)(R[rng.randrange(16)], src)
+        elif kind == 6:
+            p.cyc(R[rng.randrange(16)], R[rng.randrange(16)]).frames(
+                R[rng.randrange(16)]
+            )
+        elif kind == 7:
+            p.label(f"l{i}").bmi8(R[rng.randrange(16)], f"l{i}x").out(
+                R[rng.randrange(16)]
+            )
+            p.label(f"l{i}x")
+        else:
+            p.outmem(rng.randrange(0x10000), rng.randrange(8))
+    for r in R:
+        p.out(r)
+    return p
+
+
+def program_divergence(seed: int, cycles: int, forks: int = 3) -> Optional[str]:
+    """Run random driver programs from program ``seed``'s start on both backends, alone
+    and as forks; ``None`` if every outcome and machine state agrees."""
+    start, pcs, cut = _probe(seed, cycles)
+    if not pcs:
+        return None
+    budget = max(0, cut - start - 64) // (2 * forks)
+    progs = [random_program(seed + i, budget, pcs) for i in range(forks)]
+    got = []
+    for backend in ("python", "native"):
+        sid = (PyNativeSid if backend == "python" else vm.NativeSid)("6581", Sid().read)
+        machine = _machine(seed, backend, sid, None)
+        load(machine, seed)
+        outs, kept = machine.run_forks(progs, keep=True)
+        alone = machine.run_program(progs[0])
+        got.append((outs, [state(k) for k in kept], alone, state(machine)))
+    for name, x, y in zip(("forks", "fork states", "program", "state"), *got):
+        if x != y:
+            return f"{name} differ"
+    return None

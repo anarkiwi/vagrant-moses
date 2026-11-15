@@ -6,7 +6,7 @@
 //! except the edge set, which grows only by new edges.
 
 use crate::smc::{peek, view, V_IO};
-use crate::sys::{Sys, RAM};
+use crate::sys::Sys;
 use std::collections::HashSet;
 
 pub const PH_NONE: u8 = 0;
@@ -96,7 +96,7 @@ fn operands(
         if k < 3 {
             fetched[k]
         } else {
-            s.img[RAM][addr as usize]
+            s.ram[addr as usize]
         }
     };
     let (b1, w) = (fetched[1], fetched[1] as u16 | (fetched[2] as u16) << 8);
@@ -157,7 +157,7 @@ impl Scan {
             return;
         }
         if self.t0 < 0 {
-            let ram = &s.img[RAM];
+            let ram = &s.ram;
             let word = |a: usize| ram[a] as u16 | (ram[a + 1] as u16) << 8;
             (self.t0, self.vector) = (t, Some((s.bits as u8, word(0x314), word(0xFFFE))));
         }
@@ -274,7 +274,7 @@ impl Tracer {
         };
         for &addr in &st.addrs[..st.n] {
             if addr < 2 || view(st.bits, addr) != V_IO {
-                self.stored(addr, s.img[RAM][addr as usize]);
+                self.stored(addr, s.ram[addr as usize]);
             } else if !self.window(addr) {
                 if let Some(v) = st.stored {
                     self.stored(addr, v);
@@ -371,7 +371,7 @@ impl Tracer {
     /// Close the current phase: its record, edges restarting at the next call.
     pub fn snap(&mut self, s: &Sys) -> Record {
         self.last = None;
-        let (ram, base) = (&s.img[RAM], &mut *self.base);
+        let (ram, base) = (&s.ram, &mut *self.base);
         let mut idx = Vec::new();
         let (pages, olds) = (ram.as_chunks::<256>().0, base.as_chunks_mut::<256>().0);
         for (p, (r, b)) in pages.iter().zip(olds).enumerate() {

@@ -122,7 +122,8 @@ class Counted:
 
 
 def bench(backend, workload, kind, seconds):
-    """``(Mcycles/s, x realtime, SID writes)`` for ``seconds`` PAL seconds."""
+    """``(Mcycles/s, best slice Mcycles/s, x realtime, SID writes)`` for ``seconds`` PAL
+    seconds; the best slice is the least disturbed by other load on the host."""
     sid = {"none": None, "device": Sid(), "logged": Counted()}[kind]
     dev = sid.dev if kind == "logged" else sid
     machine = Machine(sids=None if dev is None else {mm.SID_BASE: dev}, backend=backend)
@@ -135,36 +136,44 @@ def bench(backend, workload, kind, seconds):
     machine.ram[TABLE : TABLE + 256] = bytes(range(256))
     start = machine.reset(ORG, boot_cycle(False))
     clock = mm.PAL.clock_hz
-    slices, wall = int(seconds * SLICES), 0.0
+    slices, wall, best = int(seconds * SLICES), 0.0, float("inf")
     for n in tqdm(
         range(1, slices + 1), desc=f"{backend}/{workload}/{kind}", unit="s/10"
     ):
         began = time.perf_counter()
         machine.run(start + n * clock // SLICES)
-        wall += time.perf_counter() - began
+        took = time.perf_counter() - began
+        wall += took
+        best = min(best, took)
         if kind == "logged":
             sid.drain()
     cycles = machine.t - start
     writes = getattr(sid, "count", 0)
-    return cycles / wall / 1e6, cycles / wall / clock, writes
+    return (
+        cycles / wall / 1e6,
+        clock / SLICES / best / 1e6,
+        cycles / wall / clock,
+        writes,
+    )
 
 
 def main():
-    """Print Mcycles/s and the speed relative to a real C64 per backend, workload, SID."""
+    """Print Mcycles/s (mean and best slice) and the speed relative to a real C64 per backend, workload, SID."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=20)
     parser.add_argument("--backend", choices=("python", "native"), action="append")
     parser.add_argument("--workload", choices=("play", "heavy"), action="append")
     parser.add_argument("--sid", choices=("none", "device", "logged"), action="append")
     args = parser.parse_args()
-    print("| backend | workload | SID | Mcycles/s | x realtime | SID writes |")
-    print("|---|---|---|---:|---:|---:|")
+    print("| backend | workload | SID | Mcycles/s | best | x realtime | SID writes |")
+    print("|---|---|---|---:|---:|---:|---:|")
     for backend in args.backend or ["python"] + ["native"] * NATIVE:
         for workload in args.workload or ("play", "heavy"):
             for kind in args.sid or ("none", "device", "logged"):
-                mcps, ratio, writes = bench(backend, workload, kind, args.seconds)
+                mcps, best, ratio, writes = bench(backend, workload, kind, args.seconds)
                 print(
-                    f"| {backend} | {workload} | {kind} | {mcps:.2f} | {ratio:.1f} | {writes} |"
+                    f"| {backend} | {workload} | {kind} | {mcps:.2f} | {best:.2f} "
+                    f"| {ratio:.1f} | {writes} |"
                 )
 
 

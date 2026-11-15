@@ -17,9 +17,9 @@ use moses_core::calls::{Calls, Records, HALT_CYCLES, HALT_JAM};
 use moses_core::frames::{Frames, EVENT_BYTES, ROW_BYTES, SOURCES};
 use moses_core::lines::NAMES;
 use moses_core::machine::{DA, M_RTS};
+use moses_core::prog::{self, Alu, Cond, Op, Prog, Src, STATUSES};
 use moses_core::reu::{geometry, REGS, SIZES};
 use moses_core::smc::{Budget, STOPS, STOP_JAM, STOP_NONE};
-use moses_core::sys::RAM;
 use moses_core::trace::{Facts, Scan, Tracer};
 use moses_core::{smc, Config, Core, Host, Layout, Recorder, SidDev, SidShared, Watch};
 use pyo3::buffer::PyBuffer;
@@ -28,7 +28,7 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::pyclass::{PyTraverseError, PyVisit};
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PySlice, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyFrozenSet, PyList, PySlice, PyTuple};
 
 thread_local!(static TOKEN: u8 = const { 0 });
 
@@ -382,6 +382,61 @@ impl Machine {
             .ok_or_else(|| PyRuntimeError::new_err("the trace is not armed"))
     }
 
+    /// A Python machine around `core`, a bare fork of this one: Python SID devices shared,
+    /// each `NativeSid` wrapped around the fork's copy.
+    fn adopt(slf: &Bound<'_, Self>, core: Core) -> PyResult<Py<Machine>> {
+        let py = slf.py();
+        let me = slf.get();
+        let sids = PyDict::new(py);
+        let mut logged: Vec<Py<NativeSid>> = Vec::new();
+        for (base, dev) in &core.s.sids {
+            let old = me.sids.bind(py).get_item(base)?;
+            let old = old.ok_or_else(|| PyRuntimeError::new_err("SID base not found"))?;
+            let new = match dev {
+                SidDev::Logged(state, _) => {
+                    let sid = old.cast::<NativeSid>()?.get();
+                    let n = Py::new(
+                        py,
+                        NativeSid {
+                            shared: Arc::clone(state),
+                            on_read: sid.on_read.clone_ref(py),
+                            owner: Owner::default(),
+                            model: sid.model.clone(),
+                        },
+                    )?;
+                    logged.push(n.clone_ref(py));
+                    n.into_any()
+                }
+                SidDev::Host(_) => old.unbind(),
+            };
+            sids.set_item(base, new)?;
+        }
+        let devs = me
+            .devs
+            .iter()
+            .map(|d| HostDev {
+                obj: d.obj.clone_ref(py),
+                on_read: d.on_read,
+            })
+            .collect();
+        Py::new(
+            py,
+            Machine {
+                core: UnsafeCell::new(Box::new(core)),
+                devs,
+                logged,
+                sids: sids.unbind(),
+                sink: None,
+                on_io: None,
+                hooks: UnsafeCell::new(Hooks::default()),
+                owner: Owner::default(),
+                active: AtomicPtr::new(ptr::null_mut()),
+                ntsc: me.ntsc,
+                views: Default::default(),
+            },
+        )
+    }
+
     /// The hook a port write dispatches to, once the write is made.
     fn port_hook(slf: &Bound<'_, Self>, core: &mut Core) -> PyResult<()> {
         if !std::mem::take(&mut core.s.port_dirty) || !core.armed || !core.port_set {
@@ -718,7 +773,7 @@ impl Machine {
         let core = self.core()?;
         core.arm_pc = Some(idle_pc);
         core.armed = false;
-        core.watch = Watch::Set(AddrSet::default());
+        core.watch = Watch::none();
         Ok(())
     }
 
@@ -805,7 +860,6 @@ impl Machine {
     /// `events` (no `on_event` sink); `on_io`, the trap, decode and port hooks are not
     /// carried over. Refused while the machine runs or the SMC recorder is armed.
     fn clone(slf: &Bound<'_, Self>) -> PyResult<Py<Machine>> {
-        let py = slf.py();
         let me = slf.get();
         let _claim = me.owner.claim()?;
         let _sids = me
@@ -817,56 +871,106 @@ impl Machine {
         let mut core = unsafe { &*me.core.get() }
             .fork()
             .ok_or_else(|| PyRuntimeError::new_err("the SMC recorder is armed"))?;
-        (core.trap_set, core.decode_set, core.port_set) = (false, false, false);
-        core.s.custom_sink = false;
-        let sids = PyDict::new(py);
-        let mut logged: Vec<Py<NativeSid>> = Vec::new();
-        for (base, dev) in &core.s.sids {
-            let old = me.sids.bind(py).get_item(base)?;
-            let old = old.ok_or_else(|| PyRuntimeError::new_err("SID base not found"))?;
-            let new = match dev {
-                SidDev::Logged(state, _) => {
-                    let sid = old.cast::<NativeSid>()?.get();
-                    let n = Py::new(
-                        py,
-                        NativeSid {
-                            shared: Arc::clone(state),
-                            on_read: sid.on_read.clone_ref(py),
-                            owner: Owner::default(),
-                            model: sid.model.clone(),
-                        },
-                    )?;
-                    logged.push(n.clone_ref(py));
-                    n.into_any()
-                }
-                SidDev::Host(_) => old.unbind(),
-            };
-            sids.set_item(base, new)?;
-        }
-        let devs = me
-            .devs
+        core.bare();
+        Self::adopt(slf, core)
+    }
+
+    /// Run driver program `program` (a `vagrant_moses.program.Program` or its `Code`) here,
+    /// with the GIL released; returns its `Outcome`.
+    fn run_program(slf: &Bound<'_, Self>, program: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let me = slf.get();
+        let py = slf.py();
+        let code = Code::of(program)?;
+        let _claim = me.owner.claim()?;
+        let _sids = me
+            .logged
             .iter()
-            .map(|d| HostDev {
-                obj: d.obj.clone_ref(py),
-                on_read: d.on_read,
-            })
-            .collect();
-        Py::new(
-            py,
-            Machine {
-                core: UnsafeCell::new(Box::new(core)),
+            .map(|sid| sid.get().owner.claim())
+            .collect::<PyResult<Vec<_>>>()?;
+        // SAFETY: claimed above; the claim is dropped only after the run returns.
+        let core = CorePtr(unsafe { &mut **me.core.get() });
+        if unsafe { &*core.0 }.s.rec.is_some() {
+            return Err(PyRuntimeError::new_err("the SMC recorder is armed"));
+        }
+        let mut host = me.host();
+        let (out, err) = py.detach(|| {
+            let core = core;
+            // SAFETY: as above; the pointee outlives this closure.
+            let out = prog::run(unsafe { &mut *core.0 }, &mut host, &code);
+            (out, host.err.take())
+        });
+        err.map_or_else(|| outcome(py, out), Err)
+    }
+
+    /// Run each program on its own fork of this idle machine, on `threads` threads (default:
+    /// one per core) with the GIL released, in program order; with `keep`, `(outcomes,
+    /// forks)`. The SIDs must be `NativeSid`s (their `on_read` is shared by the forks).
+    #[pyo3(signature = (programs, threads=None, keep=false))]
+    fn run_forks(
+        slf: &Bound<'_, Self>,
+        programs: &Bound<'_, PyAny>,
+        threads: Option<usize>,
+        keep: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let me = slf.get();
+        let py = slf.py();
+        let codes = programs
+            .try_iter()?
+            .map(|p| Code::of(&p?))
+            .collect::<PyResult<Vec<_>>>()?;
+        if me.devs.iter().any(|d| !d.on_read) {
+            return Err(PyValueError::new_err(
+                "forks share a Python SID device: use a NativeSid",
+            ));
+        }
+        let _claim = me.owner.claim()?;
+        let _sids = me
+            .logged
+            .iter()
+            .map(|sid| sid.get().owner.claim())
+            .collect::<PyResult<Vec<_>>>()?;
+        // SAFETY: claimed above, so nothing else holds the core until the batch is over.
+        let base = CorePtr(unsafe { &mut **me.core.get() });
+        if unsafe { &*base.0 }.s.rec.is_some() {
+            return Err(PyRuntimeError::new_err("the SMC recorder is armed"));
+        }
+        let threads = threads
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+            .clamp(1, codes.len().max(1));
+        let idle = AtomicPtr::new(ptr::null_mut());
+        let devs = &me.devs[..];
+        let done = py.detach(|| {
+            let base = base;
+            // SAFETY: as above; forks only read the base.
+            let base = unsafe { &*base.0 };
+            prog::run_forks(base, &codes, threads, keep, |_| PyHost {
                 devs,
-                logged,
-                sids: sids.unbind(),
                 sink: None,
                 on_io: None,
-                hooks: UnsafeCell::new(Hooks::default()),
-                owner: Owner::default(),
-                active: AtomicPtr::new(ptr::null_mut()),
-                ntsc: me.ntsc,
-                views: Default::default(),
-            },
-        )
+                hooks: Hooks::default(),
+                me: None,
+                active: &idle,
+                err: None,
+            })
+        });
+        let (mut outs, mut forks) = (Vec::new(), Vec::new());
+        for (o, h, core) in done {
+            if let Some(e) = h.err {
+                return Err(e);
+            }
+            outs.push(outcome(py, o)?);
+            if let Some(core) = core {
+                forks.push(Self::adopt(slf, core)?);
+            }
+        }
+        let outs = PyList::new(py, outs)?.into_any();
+        if !keep {
+            return Ok(outs.unbind());
+        }
+        Ok((outs, PyList::new(py, forks)?)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
     }
 
     /// Bring the chips to `cycle` (default: the power-on delay) and start the CPU at `entry`.
@@ -1056,7 +1160,7 @@ impl Machine {
     ) -> PyResult<()> {
         let t = table16(table)?;
         let core = self.core()?;
-        let mut tr = Tracer::new(t, sentinel, lo, hi, &core.s.img[RAM]);
+        let mut tr = Tracer::new(t, sentinel, lo, hi, &core.s.ram);
         tr.facts = facts;
         self.rec(core)?.tracer = Some(Box::new(tr));
         Ok(())
@@ -1191,7 +1295,7 @@ impl Machine {
         (r.calls, r.frames) = (Some(Box::new(Calls::new(calls, ports, sentinel))), None);
         let mut set = AddrSet::default();
         set.insert(sentinel);
-        (core.watch, core.trap_set) = (Watch::Set(set), true);
+        (core.watch, core.trap_set) = (Watch::Set(set.into()), true);
         Ok(())
     }
 
@@ -1270,7 +1374,7 @@ impl Machine {
         (r.frames, r.calls) = (Some(Box::new(Frames::new(sentinel))), None);
         let mut set = AddrSet::default();
         set.insert(sentinel);
-        (core.watch, core.trap_set) = (Watch::Set(set), true);
+        (core.watch, core.trap_set) = (Watch::Set(set.into()), true);
         Ok(())
     }
 
@@ -1289,7 +1393,7 @@ impl Machine {
         }
         fr.live = false;
         self.rec(core)?.frames = f;
-        (core.watch, core.trap_set) = (Watch::Set(AddrSet::default()), false);
+        (core.watch, core.trap_set) = (Watch::none(), false);
         Ok(())
     }
 
@@ -1491,7 +1595,196 @@ fn to_watch(watch: &Bound<'_, PyAny>) -> PyResult<Watch> {
     for a in watch.try_iter()? {
         set.insert((a?.extract::<i64>()? & 0xFFFF) as u16);
     }
-    Ok(Watch::Set(set))
+    Ok(Watch::Set(set.into()))
+}
+
+/// A validated driver program (`vagrant_moses.program.Program.native()`).
+#[pyclass(module = "vagrant_moses._core", name = "Code", frozen)]
+pub struct Code(Arc<Prog>);
+
+impl Code {
+    fn of(obj: &Bound<'_, PyAny>) -> PyResult<Arc<Prog>> {
+        if let Ok(c) = obj.cast::<Code>() {
+            return Ok(Arc::clone(&c.get().0));
+        }
+        let c = obj.call_method0("native")?;
+        Ok(Arc::clone(&c.cast::<Code>()?.get().0))
+    }
+}
+
+fn src(kind: i64, v: i64) -> PyResult<Src> {
+    match kind {
+        0 => u32::try_from(v).map(Src::Imm).ok(),
+        1 => u8::try_from(v).ok().map(Src::Reg),
+        _ => None,
+    }
+    .ok_or_else(|| PyValueError::new_err(format!("bad operand ({kind}, {v})")))
+}
+
+fn pcset(obj: &Bound<'_, PyAny>) -> PyResult<AddrSet> {
+    let mut set = AddrSet::default();
+    for a in obj.try_iter()? {
+        set.insert(
+            u16::try_from(a?.extract::<i64>()?)
+                .map_err(|_| PyValueError::new_err("a pc is 16 bits"))?,
+        );
+    }
+    Ok(set)
+}
+
+/// One op of `Program.code`: `(name, *operands)`.
+fn op(t: &Bound<'_, PyTuple>, marker: Option<u16>) -> PyResult<Op> {
+    let name: String = t.get_item(0)?.extract()?;
+    let n = |i: usize| -> PyResult<i64> { t.get_item(i)?.extract() };
+    let u = |i: usize| -> PyResult<u32> {
+        u32::try_from(n(i)?).map_err(|_| PyValueError::new_err(format!("{name}: bad operand {i}")))
+    };
+    let b = |i: usize| -> PyResult<u8> {
+        u8::try_from(n(i)?).map_err(|_| PyValueError::new_err(format!("{name}: bad operand {i}")))
+    };
+    let w = |i: usize| -> PyResult<u16> {
+        u16::try_from(n(i)?).map_err(|_| PyValueError::new_err(format!("{name}: bad operand {i}")))
+    };
+    Ok(match name.as_str() {
+        "KEYS" => Op::Keys([b(1)?, b(2)?, b(3)?, b(4)?, b(5)?, b(6)?, b(7)?, b(8)?]),
+        "KEY" => Op::Key {
+            row: b(1)?,
+            col: b(2)?,
+            down: n(3)? != 0,
+        },
+        "KEYR" => Op::KeyR {
+            r: b(1)?,
+            down: n(2)? != 0,
+        },
+        "RUN" => {
+            let pcs = t.get_item(1)?;
+            let (watch, target) = if pcs.is_none() {
+                (Watch::All, Watch::All)
+            } else {
+                let target = pcset(&pcs)?;
+                let mut watch = target.clone();
+                if let Some(m) = marker {
+                    watch.insert(m);
+                }
+                (Watch::Set(watch.into()), Watch::Set(target.into()))
+            };
+            Op::Run {
+                watch,
+                target,
+                n: src(n(2)?, n(3)?)?,
+                here: n(4)? != 0,
+            }
+        }
+        "LD" => {
+            let idx = n(3)?;
+            Op::Ld {
+                r: b(1)?,
+                addr: w(2)?,
+                idx: if idx < 0 { None } else { Some(b(3)?) },
+                mode: b(4)?,
+            }
+        }
+        "ALU" => {
+            const ALU: [Alu; 10] = [
+                Alu::Mov,
+                Alu::Add,
+                Alu::Sub,
+                Alu::And,
+                Alu::Or,
+                Alu::Xor,
+                Alu::Shl,
+                Alu::Shr,
+                Alu::Add8,
+                Alu::Sub8,
+            ];
+            let op = *ALU
+                .get(u(1)? as usize)
+                .ok_or_else(|| PyValueError::new_err("bad ALU op"))?;
+            Op::Alu {
+                op,
+                d: b(2)?,
+                s: src(n(3)?, n(4)?)?,
+            }
+        }
+        "CYC" => Op::Cyc {
+            lo: b(1)?,
+            hi: b(2)?,
+        },
+        "FRAMES" => Op::Frames(b(1)?),
+        "BR" => {
+            const COND: [Cond; 4] = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Ge];
+            let cond = *COND
+                .get(u(1)? as usize)
+                .ok_or_else(|| PyValueError::new_err("bad condition"))?;
+            Op::Br {
+                cond,
+                a: b(2)?,
+                b: src(n(3)?, n(4)?)?,
+                to: u(5)? as usize,
+            }
+        }
+        "BIT7" => Op::Bit7 {
+            r: b(1)?,
+            set: n(2)? != 0,
+            to: u(3)? as usize,
+        },
+        "JMP" => Op::Jmp(u(1)? as usize),
+        "DJNZ" => Op::Djnz {
+            r: b(1)?,
+            to: u(2)? as usize,
+        },
+        "OUT" => Op::Out(b(1)?),
+        "OUTMEM" => Op::OutMem {
+            addr: w(1)?,
+            len: w(2)?,
+        },
+        "HALT" => Op::Halt(src(n(1)?, n(2)?)?),
+        _ => return Err(PyValueError::new_err(format!("unknown op {name}"))),
+    })
+}
+
+#[pymethods]
+impl Code {
+    #[new]
+    fn new(
+        code: &Bound<'_, PyAny>,
+        budget: u64,
+        marker: Option<u16>,
+        max_ops: u64,
+    ) -> PyResult<Self> {
+        let ops = code
+            .try_iter()?
+            .map(|t| op(t?.cast::<PyTuple>()?, marker))
+            .collect::<PyResult<Vec<_>>>()?;
+        Prog::new(ops, budget, marker, max_ops)
+            .map(|p| Code(Arc::new(p)))
+            .ok_or_else(|| PyValueError::new_err("a register or branch target is out of range"))
+    }
+
+    fn __len__(&self) -> usize {
+        self.0.ops.len()
+    }
+}
+
+static OUTCOME: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// `vagrant_moses.program.Outcome` of `o`.
+fn outcome(py: Python<'_>, o: prog::Outcome) -> PyResult<Py<PyAny>> {
+    let cls = OUTCOME.get_or_try_init(py, || {
+        py.import("vagrant_moses.program")?
+            .getattr("Outcome")
+            .map(Bound::unbind)
+    })?;
+    cls.call1(
+        py,
+        (
+            STATUSES[o.status as usize],
+            o.code,
+            o.cycle,
+            o.frames,
+            PyTuple::new(py, o.out)?,
+        ),
+    )
 }
 
 /// A zero-copy view of the RAM or the colour RAM (bytearray-like).
@@ -1515,10 +1808,8 @@ impl Memory {
                     .ok_or_else(|| PyRuntimeError::new_err("the machine has no REU"))?;
                 (reu.ram.as_mut_ptr(), reu.ram.len())
             }
-            k => (
-                core.s.img[k.saturating_sub(1) as usize].as_mut_ptr(),
-                0x10000,
-            ),
+            0 => (core.s.ram.as_mut_ptr(), 0x10000),
+            k => (core.s.rom_mut(k as usize - 1).as_mut_ptr(), 0x10000),
         })
     }
 
@@ -1856,6 +2147,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Reu>()?;
     m.add_class::<Chip>()?;
     m.add_class::<NativeSid>()?;
+    m.add_class::<Code>()?;
     m.add_class::<WatchAll>()?;
     m.add("WATCH_ALL", watch_all(m.py())?.clone_ref(m.py()))?;
     m.add("NAMES", PyTuple::new(m.py(), NAMES)?)?;

@@ -72,12 +72,17 @@ pub struct Layout {
 #[derive(Clone)]
 pub enum Watch {
     All,
-    Set(AddrSet),
+    Set(Arc<AddrSet>),
 }
 
 impl Watch {
+    /// An empty set: nothing is watched.
+    pub fn none() -> Watch {
+        Watch::Set(Arc::default())
+    }
+
     #[inline(always)]
-    fn contains(&self, pc: u16) -> bool {
+    pub fn contains(&self, pc: u16) -> bool {
         match self {
             Watch::All => true,
             Watch::Set(s) => s.contains(pc),
@@ -127,6 +132,8 @@ pub struct Core {
     pub trap_set: bool,
     pub decode_set: bool,
     pub port_set: bool,
+    /// The last run stopped at a program's trap, before the instruction at `cpu.pc` ran.
+    pub parked: bool,
 }
 
 impl Core {
@@ -148,7 +155,9 @@ impl Core {
             vic,
             cia,
             ln: Lines::new(),
-            img: [cfg.ram, basic, chargen, kernal],
+            ram: cfg.ram,
+            rom: [basic.into(), chargen.into(), kernal.into()],
+            rom_pinned: false,
             map: [RAM as u8; 16],
             colour: Box::new([0; 0x400]),
             port_dir: dir,
@@ -197,10 +206,11 @@ impl Core {
             ntsc: cfg.ntsc,
             armed: false,
             arm_pc: None,
-            watch: Watch::Set(AddrSet::default()),
+            watch: Watch::none(),
             trap_set: false,
             decode_set: false,
             port_set: false,
+            parked: false,
         }
     }
 
@@ -234,6 +244,7 @@ impl Core {
             trap_set,
             decode_set,
             port_set,
+            parked,
         } = self;
         Some(Core {
             cpu: cpu.clone(),
@@ -262,7 +273,14 @@ impl Core {
             trap_set: *trap_set,
             decode_set: *decode_set,
             port_set: *port_set,
+            parked: *parked,
         })
+    }
+
+    /// Drop the host hooks and the event sink: events collect in `s.events`.
+    pub fn bare(&mut self) {
+        (self.trap_set, self.decode_set, self.port_set) = (false, false, false);
+        self.s.custom_sink = false;
     }
 
     /// Bring the chips to `cycle` and start the CPU at `entry` (`Machine.reset`).
@@ -282,6 +300,7 @@ impl Core {
         self.base = 0;
         self.ikind = K_NONE;
         self.s.ln.cc = 6;
+        self.parked = false;
     }
 
     /// `machine[addr]` from the host.
@@ -363,7 +382,7 @@ impl Core {
             self.cross = (target ^ nxt) & 0xFF00 != 0;
             self.dummy = nxt & 0xFF00 | target & 0xFF;
         } else if mode == M_RTS {
-            let stack = |i: u8| self.s.img[RAM][0x100 | self.cpu.sp.wrapping_add(i) as usize];
+            let stack = |i: u8| self.s.ram[0x100 | self.cpu.sp.wrapping_add(i) as usize];
             self.dummy = u16::from_le_bytes([stack(1), stack(2)]);
         } else if mode != M_NONE {
             let (lo, hi) = if mode == M_INDY {
@@ -446,9 +465,9 @@ impl Core {
     fn push(&mut self, value: u8) {
         let addr = 0x100 | self.cpu.sp as usize;
         if let Some(r) = self.s.rec.as_deref_mut() {
-            r.note(addr as u16, self.s.img[RAM][addr], true);
+            r.note(addr as u16, self.s.ram[addr], true);
         }
-        self.s.img[RAM][addr] = value;
+        self.s.ram[addr] = value;
         self.cpu.sp = self.cpu.sp.wrapping_sub(1);
     }
 
@@ -601,6 +620,9 @@ impl Core {
     pub fn run<H: Host>(&mut self, h: &mut H, limit: i64) {
         self.stop = false;
         let mut t = self.t;
+        if t < limit {
+            self.parked = false;
+        }
         while t < limit && !self.jammed && !self.stop && !h.failed() {
             let t2 = t << 1;
             if self.s.sched.next <= t2 {

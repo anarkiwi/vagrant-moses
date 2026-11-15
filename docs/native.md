@@ -16,6 +16,7 @@ backend="native"|"python")` picks one, native when `_core` imports and the class
 | `tools/harte_cycles.py` | Bus cycles of every opcode against SingleStepTests 6502 cases (`docs/c64.md`, Bus cycles). |
 | `tools/bench_machine.py` | Playroutine-shaped and SID-write-heavy benchmark of both backends, with no SID, a Python device or a `NativeSid`. |
 | `tools/thread_machines.py` | N machines on N threads against one (`--sid` for `NativeSid`). |
+| `tools/bench_forks.py` | `run_forks` forks/s and emulated frames/s by thread count. |
 | `src/vagrant_moses/sid.py` | `PyNativeSid`, the pure-Python `NativeSid` the Python machine uses. |
 
 `moses-core` runs the 6510 on `jennings-core` (`Cpu::step` over a `Bus` implementation);
@@ -84,10 +85,16 @@ attribute access; independent machines run in parallel.
 
 `clone()` forks the machine: the copy, run for any number of cycles, behaves exactly as the
 original run for the same cycles. `Core::fork` copies everything the core models (the CPU,
-RAM, ROM images, banking, colour RAM, VIC-II, both CIAs, interrupt lines, scheduler, pending
-I/O writes, open-bus seed, last read, REU, collected events) as plain Rust values; the opcode
-layouts are shared. Nothing goes through Python, so a fork is a few memory copies (the four
-64 KiB images, plus the REU's RAM).
+RAM, banking, colour RAM, VIC-II, both CIAs, interrupt lines, scheduler, pending I/O
+writes, open-bus seed, last read, REU, collected events) as plain Rust values; the opcode
+layouts are shared. Nothing goes through Python, so a fork is a few memory copies (the
+64 KiB RAM and 1 KiB colour RAM, plus the REU's RAM and the events collected so far).
+
+The BASIC, CHARGEN and KERNAL images are shared between a machine and its forks (`Arc`) and
+copied on write: a ROM view (`machine.pages`) unshares the image it is taken of before handing
+out its memory and pins the machine, whose later forks then copy the images rather than share
+them, so a write through a view the caller holds never reaches another machine. RAM is copied:
+`machine.ram` is one contiguous zero-copy buffer, which sharing pages would break.
 
 - Each `NativeSid` is copied into a new `NativeSid` with the same bus value, `last` and
   `on_read`, and empty write logs; a Python SID device object is shared by both machines.
@@ -97,6 +104,74 @@ layouts are shared. Nothing goes through Python, so a fork is a few memory copie
   sink) or while the SMC recorder is armed.
 
 A clone is idle and unclaimed, so clones run in parallel threads.
+
+## Driver programs
+
+`vagrant_moses.program.Program(budget, marker=None, max_ops=1 << 24)` is a program for a
+register machine that drives the keyboard and runs the machine to program counters
+(`crates/moses-core/src/prog.rs`; `program.py` is the Python reference). `machine.run_program(p)`
+runs it on either backend and returns `Outcome(status, code, cycle, frames, outputs)`; the
+native machine runs it inside `Core::run` with the GIL released and no Python call per op.
+The builder methods append one op each and return the program; `label(name)` names the next
+op as a branch target; `code` is the validated `(name, *operands)` tuple with labels resolved,
+`native()` the native machine's compiled form (cached, reusable on any machine).
+
+There are sixteen `u32` registers `R[0]`-`R[15]`, all 0 at the start. A source operand `s` is a
+register or a `u32` immediate. `budget` caps the cycles from the program's start: every run op
+runs to at most `start + budget`. `marker` is a pc whose arrivals every run op counts (a
+once-per-frame pc makes `FRAMES` a frame counter). `max_ops` caps the ops executed.
+
+| Op (builder) | Effect |
+|---|---|
+| `KEYS rows` (`keys`), `KEYS_CLEAR` (`clear`) | CIA 1's matrix = the 8 row bytes (as `keymatrix`); all released |
+| `KEY row col down` (`key`) | hold or release the key at PA line `row`, PB line `col` |
+| `KEYR r down` (`keyr`) | the same for key `r & 63` = `row * 8 + col` |
+| `RUN_TO pcs [leave]` (`run_to`) | run until the CPU is about to execute a pc in `pcs`; nothing when parked at one already, unless `leave` |
+| `COUNT_TO pc n` (`count_to`) | run until the CPU has been about to execute `pc` `n` more times (`n` = 0: nothing) |
+| `STEP n` (`step`) | run `n` decodes on: `n` instructions (an interrupt entry is not one; its handler's first instruction is) |
+| `LD r addr [idx]` (`ld`) | `r` = the byte at `addr + idx` (16-bit wrap) as the CPU sees it under the live banking, with no side effect; the I/O page as `LDIO` |
+| `LDR r addr [idx]` (`ldr`) | `r` = the RAM byte, whatever the banking |
+| `LDIO r addr [idx]` (`ldio`) | `r` = the I/O register as a CPU read now would return it, whatever the banking, read on copies of the chip, scheduler and interrupt lines so nothing changes: VIC-II `$D000-$D3FF`, colour RAM `$D800-$DBFF`, CIAs `$DC00-$DDFF` |
+| `MOV`/`LDI` `ADD SUB AND OR XOR SHL SHR` `d s` | `d = s`, `d op s` mod 2^32 (shifts by `s & 31`) |
+| `ADD8 SUB8 d s` | `(d ± s) & 0xFF` |
+| `CYC lo [hi]` (`cyc`) | `hi` = the cycle's high 32 bits, then `lo` = its low 32 bits |
+| `FRAMES r` (`frames`) | `r` = marker arrivals counted so far |
+| `BEQ BNE BLT BGE a s label` | branch on `a == s`, `!=`, `<`, `>=` (unsigned) |
+| `BMI8 BPL8 r label` | branch when bit 7 of `r` is set / clear (after `SUB8 d, cur`: the sign of `target - cur` on a wrapping 8-bit compass) |
+| `JMP label`, `DJNZ r label` | jump; `r -= 1` and jump unless it is now 0 |
+| `OUT r`, `OUTMEM addr len` | append `r`; append `len` bytes as `LD` reads them |
+| `HALT s` | end with status `halt`, code `s`; running off the end is `HALT 0` |
+
+A run op is a stop through the trap machinery: the op's pcs (and the marker) are the watch set,
+the program's own native trap counts each decode at one of them, and the decode that completes
+the op sets `stop`, so the run returns after that cycle with the instruction at `cpu.pc` decoded
+and not executed (VICE checkpoint semantics). The machine is then parked at that pc; any later
+run that advances the clock unparks it. `n` of `COUNT_TO` and `STEP` may be a register.
+
+`status` is `halt` (`code` the `HALT` code), `budget` (a run op reached `start + budget`;
+`code` its op index), `jam` (the CPU jammed; `code` the run op's index), `ops` (`max_ops`
+executed; `code` the next op's index) or `fault` (an `LD`, `LDIO` or `OUTMEM` met an address
+with no side-effect-free view, the SID and expansion pages under I/O; `code` the address).
+`cycle` is the machine's cycle at the end, `frames` the marker count, `outputs` the values
+appended, also those before a fault. The trap, decode and port hooks and `arm_at` are set
+aside while the program runs and restored after; `on_event` and `on_io` keep being called.
+A SID callback's exception ends the program and is raised. `run_program` is refused while the
+machine runs or the SMC recorder is armed.
+
+## Batched forks
+
+`vagrant_moses.run_forks(base, programs, threads=None, keep=False)` (`base.run_forks(...)`)
+runs each program on its own fork of the idle `base` and returns the outcomes in program
+order; with `keep`, `(outcomes, forks)`, each fork a machine as `clone()` makes it, left where
+its program ended. The native machine claims `base`, releases the GIL for the whole batch and
+runs the forks on `threads` scoped threads (default: one per core), each taking the next program
+from a shared counter, forking `base` itself (forks only read it) and dropping the fork after
+its program unless `keep`. Each fork's result depends only on `base` and its program, so the
+outcomes do not depend on the thread count or the scheduling. The SIDs must be `NativeSid`s
+(a shared Python device would see the forks' writes interleaved): their `on_read` is called
+with the GIL re-acquired and is shared by the forks, so it must not depend on its call order.
+The Python machine runs the forks in turn on clones, the reference the native batch equals.
+`tools/bench_forks.py` reports forks/s and emulated frames/s by thread count.
 
 ## Hooks
 
@@ -110,7 +185,8 @@ A clone is idle and unclaimed, so clones run in parallel threads.
   that wrote `$00`/`$01` (a host `machine[0 or 1] = v` calls it at once). It is called
   once per instruction, not once per write.
 - `set_decode_hook(callback | None)`: called before every decode, before the trap.
-- Any hook may set `machine.stop = True`; `run` returns after the cycle that decoded.
+- Any hook may set `machine.stop = True`; `run` returns after the cycle that decoded (the
+  Python machine's `run` honours `stop` too).
   An exception from a hook, device or sink ends the run and is raised from `run`.
 
 ## SMC recorder
@@ -287,13 +363,15 @@ comparison at the first such fetch.
 
 `pytest` runs `tests/test_machine.py` on both backends and with each kind of SID,
 `tests/test_native.py` for the Python surface and hooks, `tests/test_sid.py` for `NativeSid`,
-`tests/test_clone.py` for `clone()` on both backends, and six differential programs per SID
-kind. `tools/diff_machines.py` also clones each program halfway on both backends and checks
-the clone ends as the original. For the full gate:
+`tests/test_clone.py` for `clone()` on both backends, `tests/test_program.py` for driver
+programs and `run_forks` on both backends, and six differential programs per SID kind.
+`tools/diff_machines.py` also clones each program halfway on both backends and checks the clone
+ends as the original, and runs random driver programs alone and as forks on both backends. For the full gate:
 
 ```bash
 python tools/diff_machines.py --programs 500 --cycles 2000000 --sid both
 python tools/thread_machines.py --threads 8 --sid
 python tools/vice_reu.py --programs 48 --write-fixture   # REU programs vs VICE x64sc
 python tools/bench_machine.py --seconds 20
+python tools/bench_forks.py --forks 4000 --frames 2
 ```

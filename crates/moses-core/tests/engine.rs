@@ -196,7 +196,7 @@ fn an_reu_copies_c64_memory_while_the_cpu_halts() {
     c.run(&mut host, 2100);
     let reu = c.s.reu.as_ref().unwrap();
     assert_eq!(&reu.ram[..5], &program[..5]);
-    assert_eq!(c.s.img[0][0x2000], 0x40);
+    assert_eq!(c.s.ram[0x2000], 0x40);
     assert_eq!(
         (reu.peek(2), reu.peek(3), reu.peek(4), reu.peek(7)),
         (5, 0x10, 5, 1)
@@ -255,7 +255,7 @@ fn the_trace_observes_the_io_values_the_machine_answers() {
     );
     let mut rec = Recorder::new(image(), [1; 256], true);
     rec.begin(c.s.bits);
-    let mut tr = Tracer::new([0; 256], 0xFFFF, 0xD000, 0xE000, &c.s.img[0]);
+    let mut tr = Tracer::new([0; 256], 0xFFFF, 0xD000, 0xE000, &c.s.ram);
     tr.phase = PH_CALL;
     rec.tracer = Some(Box::new(tr));
     c.s.rec = Some(Box::new(rec));
@@ -270,7 +270,7 @@ fn the_trace_observes_the_io_values_the_machine_answers() {
     }
     let mut tr = c.s.rec.as_mut().unwrap().tracer.take().unwrap();
     let log = tr.snap(&c.s).log;
-    let ram = &c.s.img[0];
+    let ram = &c.s.ram;
     assert_eq!(
         log,
         [
@@ -311,7 +311,7 @@ fn a_fork_runs_cycle_identically_and_independently() {
     a.run(&mut host, 40_000);
     b.run(&mut host, 40_000);
     assert_eq!((a.t, &a.cpu, &a.s.events), (b.t, &b.cpu, &b.s.events));
-    assert_eq!(a.s.img[0], b.s.img[0]);
+    assert_eq!(a.s.ram, b.s.ram);
     assert!(a.s.events.len() > 10);
     let SidDev::Logged(fork, _) = &b.s.sids[0].1 else {
         panic!("the fork's SID is not logged");
@@ -320,7 +320,79 @@ fn a_fork_runs_cycle_identically_and_independently() {
     let (ours, theirs) = unsafe { (shared.state(), fork.state()) };
     assert_eq!(ours.writes[logged..], theirs.writes[..]);
     b.poke(0x2000, 0x99);
-    assert_ne!(a.s.img[0][0x2000], 0x99);
+    assert_ne!(a.s.ram[0x2000], 0x99);
     a.s.rec = Some(Box::new(Recorder::new(image(), [1; 256], true)));
     assert!(a.fork().is_none());
+}
+
+#[test]
+fn a_program_runs_to_pcs_counts_the_marker_and_forks_agree() {
+    use moses_core::prog::{self, Alu, Cond, Op, Prog, Src, ST_BUDGET, ST_HALT};
+    use moses_core::Watch;
+    // $1000: LDA #$55 / STA $2000 / JMP $1000
+    let mut c = core(&[(0x1000, &[0xA9, 0x55, 0x8D, 0x00, 0x20, 0x4C, 0x00, 0x10])]);
+    let mut host = Log::default();
+    c.reset(&mut host, 0x1000, 2000);
+    let at = |pcs: &[u16]| Watch::Set(Arc::new(pcs.iter().copied().collect()));
+    let ops = vec![
+        Op::Run {
+            watch: at(&[0x1000, 0x1005]),
+            target: at(&[0x1005]),
+            n: Src::Imm(3),
+            here: false,
+        },
+        Op::Frames(1),
+        Op::Alu {
+            op: Alu::Add,
+            d: 1,
+            s: Src::Imm(100),
+        },
+        Op::Br {
+            cond: Cond::Eq,
+            a: 1,
+            b: Src::Imm(103),
+            to: 5,
+        },
+        Op::Halt(Src::Imm(9)),
+        Op::Out(1),
+        Op::Halt(Src::Reg(1)),
+    ];
+    let p = Arc::new(Prog::new(ops, 1000, Some(0x1000), 100).unwrap());
+    let o = prog::run(&mut c, &mut host, &p);
+    assert_eq!(
+        (o.status, o.code, o.frames, &o.out[..]),
+        (ST_HALT, 103, 3, &[103][..])
+    );
+    assert!(c.parked && c.cpu.pc == 0x1005 && c.s.ram[0x2000] == 0x55);
+    let spin = Arc::new(
+        Prog::new(
+            vec![Op::Run {
+                watch: Watch::All,
+                target: Watch::All,
+                n: Src::Imm(1 << 20),
+                here: false,
+            }],
+            500,
+            None,
+            100,
+        )
+        .unwrap(),
+    );
+    let t = c.t;
+    assert_eq!(
+        prog::run(&mut c.fork().unwrap(), &mut host, &spin).status,
+        ST_BUDGET
+    );
+    let progs: Vec<_> = (0..12)
+        .map(|i| if i % 3 == 0 { &spin } else { &p })
+        .cloned()
+        .collect();
+    let one = prog::run_forks(&c, &progs, 1, false, |_| Log::default());
+    let many = prog::run_forks(&c, &progs, 5, true, |_| Log::default());
+    assert_eq!(c.t, t);
+    for ((a, _, _), (b, _, f)) in one.iter().zip(&many) {
+        assert_eq!(a, b);
+        assert_eq!(f.as_ref().unwrap().t, a.cycle);
+    }
+    assert!(Prog::new(vec![Op::Jmp(2)], 1, None, 1).is_none());
 }

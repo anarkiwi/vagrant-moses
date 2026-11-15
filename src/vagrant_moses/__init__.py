@@ -20,6 +20,7 @@ from . import (
     machine,
     media,
     memmap,
+    program,
     reu,
     roms,
     smc,
@@ -49,6 +50,7 @@ from .eventsched import Event, PHI1, PHI2, Scheduler
 from .kernal import KernalHost, KernalHostError, sys_addr
 from .machine import Machine, NativeSid, boot_cycle
 from .memmap import NTSC, PAL, Video
+from .program import Outcome, Program, R, run_forks
 from .reu import Reu
 from .roms import RomFetchError, kernal_stub
 from .vicii import NTSC_GEOMETRY, PAL_GEOMETRY, Sprites, Vic
@@ -83,6 +85,11 @@ __all__ = [
     "KernalHostError",
     "sys_addr",
     "Machine",
+    "Outcome",
+    "Program",
+    "R",
+    "program",
+    "run_forks",
     "NativeSid",
     "boot_cycle",
     "PAL",
