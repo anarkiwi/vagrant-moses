@@ -203,6 +203,58 @@ def boot_cycle(ntsc: bool) -> int:
     return times[target - 1]
 
 
+_ATOMS = (int, float, str, bytes, tuple, frozenset, type(None))
+_MISSING = object()
+
+
+def _fields(obj) -> List[str]:
+    names = list(getattr(obj, "__dict__", ()))
+    for cls in type(obj).__mro__:
+        slots = getattr(cls, "__slots__", ())
+        names += (slots,) if isinstance(slots, str) else slots
+    return [n for n in dict.fromkeys(names) if n[:2] != "__" and hasattr(obj, n)]
+
+
+def _graft(src, dst, memo: Dict[int, object]) -> None:
+    """Copy ``src``'s state onto its freshly built twin ``dst``, recursively.
+
+    Objects ``dst`` already holds a twin of (the chips, their events, the CPU) are grafted
+    in place, keeping the twin's own callbacks; ``memo`` maps each source object to its twin.
+    """
+    memo[id(src)] = dst
+    for name in _fields(src):
+        setattr(
+            dst, name, _twin(getattr(src, name), getattr(dst, name, _MISSING), memo)
+        )
+
+
+def _twin(value, mine, memo: Dict[int, object]):
+    if id(value) in memo:
+        return memo[id(value)]
+    if isinstance(value, _ATOMS):
+        return value
+    if isinstance(value, bytearray):
+        out = (
+            mine
+            if type(mine) is bytearray and len(mine) == len(value)
+            else bytearray(len(value))
+        )
+        out[:] = value
+        memo[id(value)] = out
+        return out
+    if isinstance(value, list):
+        return [_twin(v, _MISSING, memo) for v in value]
+    if isinstance(value, dict):
+        get = mine.get if isinstance(mine, dict) else lambda _k: _MISSING
+        return {k: _twin(v, get(k), memo) for k, v in value.items()}
+    if callable(value):
+        return value if mine is _MISSING else mine
+    if type(mine) is type(value) and mine is not value:
+        _graft(value, mine, memo)
+        return mine
+    return value
+
+
 class Machine(Bus):
     """The C64 under sidplayfp: a cycle-exact 6510 with the VIC-II and two CIAs.
 
@@ -285,6 +337,7 @@ class Machine(Bus):
         )
         self.on_io = on_io
         self._obs = None
+        self._running = False
         self.colour = bytearray(0x400)
         self.seed = 3686734
         self.asserted = [False] * len(SOURCES)
@@ -322,6 +375,37 @@ class Machine(Bus):
         self.cia1.reset()
         self.cia2.reset()
         self.vic.reset()
+
+    def clone(self) -> "Machine":
+        """An independent machine that runs cycle-identically to this one from here on.
+
+        Everything the machine models is copied. Python SID devices are shared; each
+        :class:`PyNativeSid` is copied with empty write logs. Events collect into the copy's
+        ``events`` (no ``on_event`` sink); ``on_io`` is not carried over. A subclass's own
+        attributes are copied as values, objects by reference. Refused while running.
+        """
+        if self._running:
+            raise RuntimeError("the machine is running")
+        memo: Dict[int, object] = {}
+        sids = {}
+        for base, dev in self.sids.items():
+            if isinstance(dev, PyNativeSid) and id(dev) not in memo:
+                memo[id(dev)] = dev.fork()
+            sids[base] = memo.get(id(dev), dev)
+        out = Machine.__new__(type(self), backend="python")
+        Machine.__init__(
+            out,
+            self.ntsc,
+            sids,
+            reu=None if self.reu is None else self.reu.size_kb,
+        )
+        memo[id(self.sched)] = out.sched
+        _graft(self, out, memo)
+        out.sched.now, out.sched.next = self.sched.now, self.sched.next
+        out.sched.queue = [memo[id(event)] for event in self.sched.queue]
+        out.bits = -1
+        out.remap()
+        return out
 
     @property
     def cycle(self) -> int:
@@ -627,11 +711,13 @@ class Machine(Bus):
 
     def run(self, limit: int) -> None:
         """Run the CPU and the chips up to cycle ``limit``."""
-        self._obs = self.on_io
+        if self._running:
+            raise RuntimeError("the machine is already running")
+        self._obs, self._running = self.on_io, True
         try:
             self._run(limit)
         finally:
-            self._obs = None
+            self._obs, self._running = None, False
 
     def touch(self, addr: int) -> int:
         """A throw-away CPU read of ``addr``: a bus access with the chips' side effects."""

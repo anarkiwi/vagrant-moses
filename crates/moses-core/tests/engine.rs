@@ -287,3 +287,40 @@ fn the_trace_observes_the_io_values_the_machine_answers() {
     assert_eq!(host.io, seen);
     assert_eq!(log, seen);
 }
+
+#[test]
+fn a_fork_runs_cycle_identically_and_independently() {
+    // A CIA timer IRQ whose handler writes a logged SID, with an REU attached.
+    let setup = [
+        0x78, 0xA9, 0x7F, 0x8D, 0x0D, 0xDC, 0xA9, 0x34, 0x8D, 0x04, 0xDC, 0xA9, 0x02, 0x8D, 0x05,
+        0xDC, 0xA9, 0x81, 0x8D, 0x0D, 0xDC, 0xA9, 0x11, 0x8D, 0x0E, 0xDC, 0x58, 0x4C, 0x1B, 0x10,
+    ];
+    let handler = [0x8D, 0x00, 0xD4, 0xAD, 0x0D, 0xDC, 0x40]; // STA $D400 / LDA $DC0D / RTI
+    let shared = Arc::new(SidShared::new(false));
+    let mut a = core_with(
+        &[(0x1000, &setup), (0x1100, &handler)],
+        SidDev::Logged(Arc::clone(&shared), 0),
+        Some(128),
+    );
+    let mut host = Log::default();
+    a.reset(&mut host, 0x1000, 2000);
+    a.run(&mut host, 4321);
+    let mut b = a.fork().unwrap();
+    // SAFETY: neither machine is running.
+    let logged = unsafe { shared.state() }.writes.len();
+    a.run(&mut host, 40_000);
+    b.run(&mut host, 40_000);
+    assert_eq!((a.t, &a.cpu, &a.s.events), (b.t, &b.cpu, &b.s.events));
+    assert_eq!(a.s.img[0], b.s.img[0]);
+    assert!(a.s.events.len() > 10);
+    let SidDev::Logged(fork, _) = &b.s.sids[0].1 else {
+        panic!("the fork's SID is not logged");
+    };
+    // SAFETY: as above.
+    let (ours, theirs) = unsafe { (shared.state(), fork.state()) };
+    assert_eq!(ours.writes[logged..], theirs.writes[..]);
+    b.poke(0x2000, 0x99);
+    assert_ne!(a.s.img[0][0x2000], 0x99);
+    a.s.rec = Some(Box::new(Recorder::new(image(), [1; 256], true)));
+    assert!(a.fork().is_none());
+}

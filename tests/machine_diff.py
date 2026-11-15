@@ -3,7 +3,7 @@
 The program is byte soup over every non-JAM opcode with CIA timers, a raster IRQ,
 sprite DMA, held keys on CIA 1's matrix and bank switching set up, a trap and a SID
 that logs. Both backends are
-observed per instruction (cycle, pc, registers, port), plus their events, SID writes
+compared per instruction (cycle, pc, registers, port), plus their events, SID writes
 and trap calls. Comparison ends at the first instruction whose fetch has a side effect (see
 :func:`_risky`): the Python engine re-reads fetched bytes by its cache state.
 """
@@ -235,6 +235,96 @@ def program(seed: int):
     return bool(rng.getrandbits(1)), bool(rng.getrandbits(1)), writes, watch, keys
 
 
+def load(machine, seed: int) -> int:
+    """Write program ``seed`` into ``machine`` and reset it; the cycle it starts at."""
+    ntsc, _, writes, _, keys = program(seed)
+    rng = random.Random(~seed)
+    machine.ram[2:0x200] = bytes(rng.choice(_OPS) for _ in range(0x1FE))
+    for lo, hi in ((0x0200, 0xD000), (0xE000, 0x10000)):
+        machine.ram[lo:hi] = (SLED * ((hi - lo) // 3 + 1))[: hi - lo]
+    for org, data in writes:
+        machine.ram[org : org + len(data)] = data
+    machine.keymatrix = keys
+    return machine.reset(0x0800, boot_cycle(ntsc))
+
+
+def _run(machine, limit: int) -> None:
+    try:
+        machine.run(limit)
+    except RuntimeError:  # the Python engine's cache-keyed re-reads met an open bus
+        pass
+
+
+def _timers(cia):
+    if hasattr(cia, "timer"):
+        return cia.timer(0), cia.timer(1)
+    return tuple((t.timer, t.latch) for t in (cia.timer_a, cia.timer_b))
+
+
+def state(machine) -> tuple:
+    """Everything a run leaves observable: cycle, registers, memory, chips and events."""
+    mpu, vic = machine.mpu, machine.vic
+    regs = (mpu.pc, mpu.a, mpu.x, mpu.y, mpu.sp, mpu.p, mpu.processorCycles)
+    beam = (bytes(vic.regs), vic.raster_y, vic.line_cycle, vic.irq_flags, vic.irq_mask)
+    cias = tuple((bytes(c.regs), _timers(c)) for c in (machine.cia1, machine.cia2))
+    reu = machine.reu and (bytes(machine.reu.ram), bytes(machine.reu.regs))
+    return (
+        machine.t,
+        machine.jammed,
+        regs,
+        machine.port_dir,
+        machine.port_data,
+        bytes(machine.ram),
+        bytes(machine.colour),
+        beam,
+        cias,
+        reu,
+        bytes(machine.keymatrix),
+        list(machine.events),
+    )
+
+
+def _machine(seed: int, backend: str, dev, reu: Optional[int]):
+    ntsc, cia_new, _, _, _ = program(seed)
+    return Machine(ntsc, {mm.SID_BASE: dev}, cia_new, backend=backend, reu=reu)
+
+
+def clone_divergence(
+    seed: int, cycles: int, backend: str, logged: bool = False
+) -> Optional[str]:
+    """Clone program ``seed`` halfway through its run of up to ``cycles`` (until it jams)
+    on ``backend`` and run both on; ``None`` if the clone ends exactly as the original.
+    """
+    probe = _machine(seed, "native" if vm.NATIVE else backend, Sid(), None)
+    start = load(probe, seed)
+    _run(probe, start + cycles)
+    sid = Sid()
+    dev = sid
+    if logged:
+        dev = (PyNativeSid if backend == "python" else vm.NativeSid)("6581", sid.read)
+    machine = _machine(seed, backend, dev, 128 if seed & 1 else None)
+    load(machine, seed)
+    _run(machine, (start + probe.t) // 2)
+    before = dev.drain_writes() if logged else list(sid.writes)
+    twin = machine.clone()
+    runs = []
+    for m in (machine, twin):
+        _run(m, start + cycles)
+        mine = m.sids[mm.SID_BASE]
+        runs.append((state(m), mine.drain_writes() if logged else None))
+    if not logged:
+        tail = sid.writes[len(before) :]
+        half = len(tail) // 2
+        if tail[:half] != tail[half:]:
+            return "SID device writes differ"
+    if runs[0] != runs[1]:
+        names = "t jammed regs dir data ram colour vic cias reu keys events sid".split()
+        flat = [runs[i][0] + (runs[i][1],) for i in (0, 1)]
+        bad = [n for n, x, y in zip(names, *flat) if x != y]
+        return f"clone differs in {', '.join(bad)}"
+    return None
+
+
 def _snapshot(trace, machine):
     mpu = machine.mpu
     trace.extend(
@@ -258,7 +348,7 @@ def run(seed: int, cycles: int, backend: str, logged: bool = False) -> Run:
     ``logged`` puts a NativeSid in front of the chip: the pure-Python one on the Python
     machine, the native one on the native machine.
     """
-    ntsc, cia_new, writes, watch, keys = program(seed)
+    ntsc, cia_new, _, watch, _ = program(seed)
     trace, traps, sid = array("q"), [], Sid()
     dev = sid
     if logged:
@@ -305,18 +395,8 @@ def run(seed: int, cycles: int, backend: str, logged: bool = False) -> Run:
         machine.arm_at(SOUP)
         machine.on_port_write(port_write)
         machine.set_decode_hook(lambda m: _snapshot(trace, m))
-    rng = random.Random(~seed)
-    machine.ram[2:0x200] = bytes(rng.choice(_OPS) for _ in range(0x1FE))
-    for lo, hi in ((0x0200, 0xD000), (0xE000, 0x10000)):
-        machine.ram[lo:hi] = (SLED * ((hi - lo) // 3 + 1))[: hi - lo]
-    for org, data in writes:
-        machine.ram[org : org + len(data)] = data
-    machine.keymatrix = keys
-    start = machine.reset(0x0800, boot_cycle(ntsc))
-    try:
-        machine.run(start + cycles)
-    except RuntimeError:  # the Python engine's cache-keyed re-reads met an open bus
-        pass
+    start = load(machine, seed)
+    _run(machine, start + cycles)
     sid_writes = dev.drain_writes() if logged else sid.writes
     return Run(trace, list(machine.events), sid_writes, traps, machine.t)
 
