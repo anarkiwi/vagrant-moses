@@ -1,5 +1,6 @@
-"""Run random programs on the Python and native machines and report any divergence,
-and on each machine a clone taken halfway that does not end as the original.
+"""Run random programs on the Python and native machines and report any divergence, on
+each machine a clone taken halfway that does not end as the original, and random driver
+programs run alone and as forks (``run_forks``) that differ between the machines.
 
 python tools/diff_machines.py --programs 500 --cycles 2000000 --jobs 24 [--sid logged]
 """
@@ -19,11 +20,14 @@ import machine_diff  # pylint: disable=wrong-import-position
 
 
 def _one(args):
-    seed, cycles, logged = args
+    seed, cycles, logged, drive = args
     why = machine_diff.compare(seed, cycles, logged)
     for backend in ("python", "native"):
         clone = machine_diff.clone_divergence(seed, cycles, backend, logged)
         why = why or (clone and f"{backend} clone: {clone}")
+    if drive:
+        drove = machine_diff.program_divergence(seed, cycles)
+        why = why or (drove and f"driver program: {drove}")
     return f"{seed}{' (logged)' if logged else ''}", why
 
 
@@ -43,7 +47,7 @@ def main():
     args = parser.parse_args()
     kinds = {"device": (False,), "logged": (True,), "both": (False, True)}[args.sid]
     seeds = [
-        (s, args.cycles, logged)
+        (s, args.cycles, logged, logged == kinds[0])
         for s in range(args.first, args.first + args.programs)
         for logged in kinds
     ]

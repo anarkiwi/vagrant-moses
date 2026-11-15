@@ -11,7 +11,6 @@ use std::collections::BTreeSet;
 use crate::calls::{host_write, Records, HALT_CYCLES, HALT_JAM, HALT_RETURN};
 use crate::machine::Core;
 use crate::smc::STOP_NONE;
-use crate::sys::RAM;
 use crate::trace::{PH_CALL, PH_NONE};
 
 /// Interrupt sources by kind: NMI, then the IRQ sources of [`crate::lines`].
@@ -91,7 +90,7 @@ pub struct Pushed {
 impl Pushed {
     pub fn read(core: &Core, kind: u8) -> Pushed {
         let (c, sp) = (&core.cpu, core.cpu.sp);
-        let byte = |k: u8| core.s.img[RAM][0x100 | sp.wrapping_add(k) as usize];
+        let byte = |k: u8| core.s.ram[0x100 | sp.wrapping_add(k) as usize];
         Pushed {
             at: c.pc,
             ret: u16::from_le_bytes([byte(2), byte(3)]),
@@ -348,7 +347,7 @@ impl Frames {
         let Some(mut tr) = core.s.rec.as_deref_mut().and_then(|r| r.tracer.take()) else {
             return;
         };
-        let ram = &core.s.img[RAM];
+        let ram = &core.s.ram;
         self.dirty |= self.closed > 0 && tr.differs_outside(ram, 1);
         let rs = &mut self.chunk.records;
         if rs.meta.is_empty() && rs.origin.is_empty() {

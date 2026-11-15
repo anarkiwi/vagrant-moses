@@ -73,7 +73,11 @@ pub struct Sys {
     pub vic: Vic,
     pub cia: [Cia; 2],
     pub ln: Lines,
-    pub img: [Box<[u8; 0x10000]>; 4],
+    pub ram: Box<[u8; 0x10000]>,
+    /// BASIC, CHARGEN and KERNAL, shared between forks until one is written (see [`Sys::rom_mut`]).
+    pub rom: [Arc<[u8; 0x10000]>; 3],
+    /// A ROM's memory was handed out mutably: forks copy the ROMs instead of sharing them.
+    pub rom_pinned: bool,
     pub map: [u8; 16],
     pub colour: Box<[u8; 0x400]>,
     pub port_dir: u8,
@@ -107,7 +111,9 @@ impl Sys {
             vic,
             cia,
             ln,
-            img,
+            ram,
+            rom,
+            rom_pinned,
             map,
             colour,
             port_dir,
@@ -129,6 +135,11 @@ impl Sys {
         if rec.is_some() {
             return None;
         }
+        let rom = if *rom_pinned {
+            rom.each_ref().map(|r| Arc::new(**r))
+        } else {
+            rom.clone()
+        };
         let sids = sids
             .iter()
             .map(|(base, dev)| {
@@ -137,7 +148,7 @@ impl Sys {
                     // SAFETY: serialised by the machine's run claim; no reference outlives
                     // the copy.
                     SidDev::Logged(state, i) => {
-                        SidDev::Logged(Arc::new(unsafe { state.state() }.fork().into()), *i)
+                        SidDev::Logged(Arc::new(unsafe { state.view() }.fork().into()), *i)
                     }
                 };
                 (*base, dev)
@@ -148,7 +159,9 @@ impl Sys {
             vic: vic.clone(),
             cia: cia.clone(),
             ln: ln.clone(),
-            img: img.clone(),
+            ram: ram.clone(),
+            rom,
+            rom_pinned: false,
             map: *map,
             colour: colour.clone(),
             port_dir: *port_dir,
@@ -167,6 +180,22 @@ impl Sys {
             rmw: *rmw,
             rec: None,
         })
+    }
+
+    /// Image `k` of the map: RAM or a ROM.
+    #[inline(always)]
+    pub fn image(&self, k: u8) -> &[u8; 0x10000] {
+        if k == RAM as u8 {
+            &self.ram
+        } else {
+            &self.rom[k as usize - 1]
+        }
+    }
+
+    /// ROM `k` (1-3) for writing: unshared first, and pinned so forks copy it.
+    pub fn rom_mut(&mut self, k: usize) -> &mut [u8; 0x10000] {
+        self.rom_pinned = true;
+        Arc::make_mut(&mut self.rom[k - 1])
     }
 
     pub fn remap(&mut self) {
@@ -376,7 +405,7 @@ impl Sys {
                     self.io_get(h, addr)
                 }
             } else {
-                self.img[k as usize][addr as usize]
+                self.image(k)[addr as usize]
             }
         } else if addr != 0 {
             port_read(self.port_dir, self.port_data)
@@ -395,11 +424,11 @@ impl Sys {
         let mut value = value;
         if addr == 0xFF00 && self.reu.as_ref().is_some_and(|r| r.armed) {
             if self.rmw {
-                value = self.img[self.map[0xF] as usize][0xFF00];
+                value = self.image(self.map[0xF])[0xFF00];
             }
             self.dma |= self.reu.as_mut().is_some_and(|r| r.ff00());
         }
-        self.img[RAM][addr as usize] = value;
+        self.ram[addr as usize] = value;
         if addr < 2 {
             if addr != 0 {
                 self.port_data = value;
@@ -415,7 +444,7 @@ impl Sys {
 impl<H: Host> Port for BusRef<'_, H> {
     fn dma_read(&mut self, addr: u16) -> u8 {
         if addr < 2 {
-            self.s.img[RAM][addr as usize]
+            self.s.ram[addr as usize]
         } else {
             self.s.rd(self.h, addr)
         }
@@ -426,7 +455,7 @@ impl<H: Host> Port for BusRef<'_, H> {
             self.s.io_write(self.h, addr, value);
         } else {
             let s = &mut *self.s;
-            let old = std::mem::replace(&mut s.img[RAM][addr as usize], value);
+            let old = std::mem::replace(&mut s.ram[addr as usize], value);
             if let Some(r) = s.rec.as_deref_mut() {
                 r.dma(addr, old, value, s.bits);
             }
@@ -450,7 +479,7 @@ impl<H: Host> Bus for BusRef<'_, H> {
     fn write(&mut self, addr: u16, v: u8) {
         let s = &mut *self.s;
         if let Some(r) = s.rec.as_deref_mut() {
-            r.note(addr, s.img[RAM][addr as usize], false);
+            r.note(addr, s.ram[addr as usize], false);
         }
         s.wr(addr, v)
     }

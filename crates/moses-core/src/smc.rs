@@ -203,10 +203,10 @@ pub(crate) fn peek(s: &Sys, addr: u16) -> (u8, u8) {
     }
     let k = s.map[(addr >> 12) as usize];
     if k == IO {
-        (s.img[RAM][addr as usize], V_IO)
+        (s.ram[addr as usize], V_IO)
     } else {
         let v = if k as usize == RAM { V_RAM } else { V_ROM };
-        (s.img[k as usize][addr as usize], v)
+        (s.image(k)[addr as usize], v)
     }
 }
 
@@ -523,7 +523,7 @@ impl Recorder {
     fn attribute(&mut self, s: &Sys, p: Prev) {
         for i in 0..std::mem::take(&mut self.nwin) {
             let (addr, old, push) = self.win[i];
-            if s.img[RAM][addr as usize] == old {
+            if s.ram[addr as usize] == old {
                 continue;
             }
             let kind = if !push {
