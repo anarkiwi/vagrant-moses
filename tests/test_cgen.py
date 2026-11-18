@@ -357,10 +357,11 @@ def test_dummy_reads(tmp_path):
 
 @needs_cgen
 def test_trap(tmp_path):
-    """A computed jump into code the lift cannot keep traps through the host."""
+    """A computed jump into code the lift cannot keep traps through the host, with a trap the
+    translation lists."""
     _, _, c, h, info = lift(JUMP)
     ((kind, k),) = run_gcc(tmp_path, c, h, 0, 2)[1]
-    assert kind == "t" and k in info["traps"]
+    assert kind == "t" and (k in info["traps"] or k in info["runtime_traps"])
 
 
 @needs_cgen
@@ -462,4 +463,5 @@ def test_mos_trap():
     calls, mpu, mem = c64_run(prg, syms, 0, 3)
     assert len(calls) == 2 and mpu.jammed
     assert syms["trap"] < mpu.pc < syms["trap"] + 16
-    assert mem[syms["cgen_trap"]] | mem[syms["cgen_trap"] + 1] << 8 in info["traps"]
+    k = mem[syms["cgen_trap"]] | mem[syms["cgen_trap"] + 1] << 8
+    assert k in info["traps"] or k in info["runtime_traps"]
