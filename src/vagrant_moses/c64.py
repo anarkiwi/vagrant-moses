@@ -1,13 +1,15 @@
 """C64 machine facts a host needs to drive a playroutine's interrupts faithfully.
 
 An interpreter already models the 6510's volatile I/O (VIC, CIA, SID); this
-supplies the surroundings -- power-on RAM, installed-vector discovery, and the
-ROM-free IRQ dispatch path that makes a handler entry a subroutine call.
+supplies the surroundings -- power-on RAM, the RAM a PSID/RSID boots onto,
+installed-vector discovery, and the ROM-free IRQ dispatch path that makes a
+handler entry a subroutine call.
 """
 
 from __future__ import annotations
 
 from . import memmap as mm
+from .roms import RomFetchError, poweron_writes
 
 IRQ_VEC = (mm.RAM_IRQ_VECTOR_LO, mm.RAM_IRQ_VECTOR_HI)  # CINV (KERNAL A/X/Y save)
 NMI_VEC = (mm.RAM_NMI_VECTOR_LO, mm.RAM_NMI_VECTOR_HI)  # NMINV
@@ -136,3 +138,104 @@ def install_irq_entry(vm, vec, kernal, img=(0, 0)):
             )
         vm.mem[addr : addr + len(code)] = code
     return IRQ_DISPATCH
+
+
+#: Tune kinds :func:`psid_boot_image` boots: a PSID, an RSID, an RSID with the C64 BASIC flag.
+PSID_KINDS = ("PSID", "RSID", "BASIC")
+#: ``psiddrv.a65``'s ``$0000-$03FE`` clear (``0x3FF`` bytes).
+PSID_CLEARED = 0x3FF
+#: The KERNAL's PAL/NTSC flag (``$02A6``: 1 PAL, 0 NTSC).
+PAL_FLAG = 0x02A6
+#: The KERNAL IRQ's exit (acknowledge CIA 1, restore A/X/Y, RTI): ``psiddrv.a65``'s
+#: ``irqret``, where sidplayfp points CINV for an RSID without the BASIC flag or a PSID.
+PSID_IRQ_EXIT = 0xEA7E
+#: The ROM-less KERNAL's reset entry, a JAM (``KernalRomBank::set``): ``psiddrv.a65``'s
+#: ``exception``, where sidplayfp points a PSID's BRK (CBINV) and NMI (NMINV) vectors.
+PSID_JAM = 0xFCE2
+#: The BASIC ``LOAD`` pointers ``SidTuneBase::placeSidTuneInC64mem`` sets: the load
+#: end in ``$2D``/``$2F``/``$31`` (variables / arrays / strings start) and ``$AE``,
+#: the load start in ``$AC``.
+BASIC_END_POINTERS, BASIC_START_POINTER = (0x2D, 0x2F, 0x31, 0xAE), 0xAC
+
+
+def psid_iomap(addr):
+    """The ``$01`` value libsidplayfp's driver banks in for PSID code at ``addr``.
+
+    ``psiddrv::iomap``: ``$37`` (BASIC, KERNAL, I/O) below ``$A000``, ``$36``
+    (KERNAL, I/O) in ``$A000-$CFFF``, ``$34`` (RAM only) in ``$D000-$DFFF`` and
+    ``$35`` (I/O only) from ``$E000``.
+    """
+    if addr < mm.BASIC_BASE:
+        return 0x37
+    if addr < mm.CHARGEN_BASE:
+        return 0x36
+    return 0x35 if addr >= mm.KERNAL_BASE else 0x34
+
+
+def _kind(kind):
+    if kind not in PSID_KINDS:
+        raise ValueError(f"unknown tune kind {kind!r} (known: {', '.join(PSID_KINDS)})")
+    return kind != "PSID"
+
+
+def psid_driver_tail(kind, init, sentinel):
+    """``(code, returns)``: the driver code ending at ``sentinel`` and where init returns.
+
+    A host that traps at ``sentinel`` runs this in place of ``psiddrv.a65``'s own
+    code, cycle for cycle, and places it at ``[sentinel - len(code), sentinel)``.
+    An RSID's init returns to ``lda``/``beq idle``; a PSID's (``kind`` ``"PSID"``)
+    enters at the code's start by ``sei``/``jmp init`` (``plp``'s I flag,
+    ``jmp (initvec)``) and returns to ``lda``/``beq``/``lda``/``beq run``/``cli``;
+    each ``lda`` reads a byte of the code.
+    """
+    s = sentinel
+    if _kind(kind):
+        return bytes([0xAD, *(s - 1).to_bytes(2, "little"), 0xF0, 0x00]), s - 5
+    tail = bytes([0xAD, *(s - 11).to_bytes(2, "little"), 0xF0, 0x00])
+    tail += bytes([0xAD, *(s - 2).to_bytes(2, "little"), 0xF0, 0x00, 0x58])
+    return bytes([0x78, 0x4C, *init.to_bytes(2, "little")]) + tail, s - len(tail)
+
+
+def psid_boot_image(kind, load, end, init, ntsc=False, image=None, sentinel=None):
+    """The 64 KiB RAM a tune's ``init`` starts on under sidplayfp, as a ``bytearray``.
+
+    ``psiddrv.a65``'s cold start and ``SidTuneBase::placeSidTuneInC64mem``:
+    ``image`` (default :func:`poweron_ram`) with ``$0000-$03FE`` cleared, for an
+    RSID (``kind`` ``"RSID"`` or ``"BASIC"``, the C64 BASIC flag) the booted
+    KERNAL's RAM (:func:`~vagrant_moses.roms.poweron_writes`) over it, ``$02A6``
+    1 for PAL or 0 for ``ntsc``, CINV at :data:`PSID_IRQ_EXIT` (an RSID without
+    the BASIC flag) or CINV, CBINV and NMINV at :data:`PSID_IRQ_EXIT`,
+    :data:`PSID_JAM`, :data:`PSID_JAM` (a PSID), the BASIC ``LOAD`` pointers
+    (:data:`BASIC_END_POINTERS` at ``end``, :data:`BASIC_START_POINTER` at
+    ``load``, each mod ``$10000``), then the tune's bytes ``image[load:end]``
+    over all of it. With a ``sentinel``, :func:`psid_driver_tail` of ``kind`` and
+    ``init`` (a PSID's init address; unused for an RSID) ends at it, last.
+
+    Raises:
+      ValueError: ``kind`` is not one of :data:`PSID_KINDS`.
+      vagrant_moses.roms.RomFetchError: an RSID's booted-KERNAL RAM is unavailable.
+    """
+    rsid = _kind(kind)
+    src = poweron_ram() if image is None else image
+    img = bytearray(src)
+    img[:PSID_CLEARED] = bytes(PSID_CLEARED)
+    if rsid:
+        runs = poweron_writes()
+        if runs is None:
+            raise RomFetchError("poweron: unavailable (offline, not cached)")
+        for addr, data in runs:
+            img[addr : addr + len(data)] = data
+    img[PAL_FLAG] = 0 if ntsc else 1
+    vectors = {"BASIC": (), "RSID": (PSID_IRQ_EXIT,)}.get(
+        kind, (PSID_IRQ_EXIT, PSID_JAM, PSID_JAM)
+    )
+    vec = b"".join(v.to_bytes(2, "little") for v in vectors)
+    img[mm.RAM_IRQ_VECTOR_LO : mm.RAM_IRQ_VECTOR_LO + len(vec)] = vec
+    pointers = [(a, end) for a in BASIC_END_POINTERS] + [(BASIC_START_POINTER, load)]
+    for addr, v in pointers:
+        img[addr : addr + 2] = (v & 0xFFFF).to_bytes(2, "little")
+    img[load:end] = src[load:end]
+    if sentinel is not None:
+        code = psid_driver_tail(kind, init, sentinel)[0]
+        img[sentinel - len(code) : sentinel] = code
+    return img
