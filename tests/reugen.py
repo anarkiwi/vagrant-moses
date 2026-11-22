@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from vagrant_moses.bus import banking
+from vagrant_moses.memmap import banking
 from vagrant_moses.machine import Machine
 from vagrant_moses.reu import FROM_REU, SIZES, SWAP, TO_REU, VERIFY, geometry
 

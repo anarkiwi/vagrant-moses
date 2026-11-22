@@ -94,6 +94,26 @@ def video(ntsc: bool) -> Video:
     return NTSC if ntsc else PAL
 
 
+def banking(bits: int):
+    """``(basic, kernal, chargen, io)`` mapped for the port's effective low bits."""
+    loram, hiram, charen = bits & LORAM, bits & HIRAM, bits & CHAREN
+    return (
+        bool(loram and hiram),
+        bool(hiram),
+        bool(not charen and (loram or hiram)),
+        bool(charen and (loram or hiram)),
+    )
+
+
+ROM_RANGES = ((BASIC_BASE, 0xC000), (CHARGEN_BASE, 0xE000), (KERNAL_BASE, 0x10000))
+
+
+def rom_ranges(port: int) -> list[tuple[int, int]]:
+    """Half-open ``(lo, hi)`` ROM ranges CPU port value ``port`` maps, in address order."""
+    basic, kernal, chargen, _ = banking(port)
+    return [r for r, on in zip(ROM_RANGES, (basic, chargen, kernal)) if on]
+
+
 def raster_compare(d011: int, d012: int) -> int:
     """The 9-bit raster compare line written as ``$D011`` bit 7 and ``$D012``."""
     return (d011 & 0x80) << 1 | d012

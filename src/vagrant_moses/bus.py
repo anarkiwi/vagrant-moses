@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from . import memmap as mm
+from .memmap import banking
 from .c64 import poweron_ram
 from .roms import rom_less
 
@@ -25,17 +26,6 @@ def port_read(ddr: int, data: int) -> int:
     if not ddr & 0x20:
         value &= ~0x20
     return value & ~(~ddr & 0xC0)
-
-
-def banking(bits: int):
-    """``(basic, kernal, chargen, io)`` mapped for the port's effective low bits."""
-    loram, hiram, charen = bits & mm.LORAM, bits & mm.HIRAM, bits & mm.CHAREN
-    return (
-        bool(loram and hiram),
-        bool(hiram),
-        bool(not charen and (loram or hiram)),
-        bool(charen and (loram or hiram)),
-    )
 
 
 class Bus:
