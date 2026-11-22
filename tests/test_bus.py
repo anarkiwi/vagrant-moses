@@ -27,6 +27,26 @@ def test_power_on_port_reads_back_as_written():
     assert port_read(0xFF, 0xC8) == 0xC8  # all outputs read as written
 
 
+BASIC, CHARGEN, KERNAL = (0xA000, 0xC000), (0xD000, 0xE000), (0xE000, 0x10000)
+C64_ROMS = {
+    0b000: [],
+    0b001: [CHARGEN],
+    0b010: [CHARGEN, KERNAL],
+    0b011: [BASIC, CHARGEN, KERNAL],
+    0b100: [],
+    0b101: [],
+    0b110: [KERNAL],
+    0b111: [BASIC, KERNAL],
+}
+
+
+@pytest.mark.parametrize("port", range(8))
+@pytest.mark.parametrize("high", [0x00, 0x08, 0xF8])
+def test_rom_ranges_follow_the_c64_banking_table(port, high):
+    assert mm.rom_ranges(port | high) == C64_ROMS[port]
+    assert mm.banking is banking
+
+
 @pytest.mark.parametrize("data", range(8))
 def test_rom_space_follows_the_port_as_the_pla_maps_it(data):
     bus = Bus(_shadowed())
