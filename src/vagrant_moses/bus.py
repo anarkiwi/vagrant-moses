@@ -1,6 +1,6 @@
 """The 6510's view of C64 memory: RAM, the ``$01``-banked ROMs and the I/O page.
 
-:class:`Bus` is a py65-style memory (``bus[addr]``, ``bus[addr] = value``) any
+:class:`Bus` is a jennings-style memory (``bus[addr]``, ``bus[addr] = value``) any
 6502 core can run on. Writes always reach RAM, also under a ROM; the CPU port at
 ``$00``/``$01`` selects the PLA's banking as the C64 does.
 """

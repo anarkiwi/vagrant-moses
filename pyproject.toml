@@ -26,17 +26,17 @@ vagrant-moses = "vagrant_moses.cli:main"
 [project.optional-dependencies]
 cli = ["tqdm>=4"]
 # The cycle-exact Machine, flat_mpu and KernalHost step a jennings 6510.
-cpu = ["jennings>=0.10.0"]
+cpu = ["jennings>=0.24.0"]
 # vagrant_moses.sidorder judges envelopes with libresidfp.
 sidorder = ["numpy>=1.23", "pylibresidfp>=0.5.0", "tqdm"]
 # vagrant_moses.cgen lifts C64 programs to C with deity-informant.
 cgen = ["deity-informant>=0.10.0"]
 dev = [
     "tqdm>=4",
-    "jennings>=0.10.0",
+    "jennings>=0.24.0",
     "numpy>=1.23",
     "pylibresidfp>=0.5.0",
-    "deity-informant==0.40.16",
+    "deity-informant==0.40.20",
     "pyelftools",
     "zstandard",
     "black>=24",

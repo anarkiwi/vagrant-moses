@@ -1,4 +1,4 @@
-"""Instruction-stepped 6510 helpers for any py65-compatible MPU over a C64 memory.
+"""Instruction-stepped 6510 helpers for any jennings MPU over a C64 memory.
 
 :func:`flat_mpu` is the cheap alternative to the cycle-exact
 :class:`~vagrant_moses.machine.Machine`: a banked :class:`~vagrant_moses.bus.Bus`
