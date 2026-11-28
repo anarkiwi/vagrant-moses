@@ -86,6 +86,9 @@ void tune_play(void) { cgen_play(0); }
   lifted functions non-recursive and placing their locals statically.
 - `tune_init`/`tune_play` implement a driver's `driver.h` (`main` calls `tune_init(song)`, then
   `tune_play()` once per frame); play gets `A = 0`, as a PSID player's play call does.
+- `HOST_REPLAYED` is `HOST` for a lift whose init deity-informant replays (its `init=`): `cgen_init`
+  takes no argument, the program being one song's, so `tune_init` calls `cgen_init()` and ignores
+  its song.
 - Defining `CGEN_HOST` drops the C64 accessors for a host that supplies its own (a gcc test
   harness logging accesses, with a `trap` leaving by `longjmp`).
 

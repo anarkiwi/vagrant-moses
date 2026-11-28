@@ -465,3 +465,37 @@ def test_mos_trap():
     assert syms["trap"] < mpu.pc < syms["trap"] + 16
     k = mem[syms["cgen_trap"]] | mem[syms["cgen_trap"] + 1] << 8
     assert k in info["traps"] or k in info["runtime_traps"]
+
+
+STUBS = """#include <stdint.h>
+#include <stdio.h>
+uint8_t io_read(uint16_t a) { return (uint8_t)a; }
+void io_write(uint16_t a, uint8_t v) { printf("w %u %u\\n", a, v); }
+void cgen_play(uint8_t a) { io_write(2, a); }
+"""
+
+
+@pytest.mark.skipif(not shutil.which("gcc"), reason="needs gcc")
+@pytest.mark.parametrize(
+    "host, init, first",
+    [
+        (cgen.HOST, "void cgen_init(uint8_t a) { io_write(1, a); }", "w 1 7"),
+        (cgen.HOST_REPLAYED, "void cgen_init(void) { io_write(1, 0); }", "w 1 0"),
+    ],
+)
+def test_hosts_call_init_as_the_lift_declares_it(tmp_path, host, init, first):
+    """Each host compiles against its ``cgen_init`` and calls it once before play: with
+    the song, or with nothing where init is replayed."""
+    main = "int main(void) { tune_init(7); tune_play(); return 0; }\n"
+    (tmp_path / "driver.h").write_text(DRIVER_H)
+    (tmp_path / "t.c").write_text(STUBS + init + "\n" + host + main)
+    exe = tmp_path / "t"
+    cmd = ["gcc", "-std=c99", "-Wall", "-Wextra", "-Werror", "-DCGEN_HOST"]
+    subprocess.run(
+        [*cmd, f"-I{tmp_path}", "-o", str(exe), str(tmp_path / "t.c")], check=True
+    )
+    out = subprocess.run([exe], capture_output=True, text=True, check=True).stdout
+    assert out.splitlines() == [first, "w 2 0"]
+    assert (
+        host.count("cgen_init(") == 1 and host.replace(" ", "").count("tune_init(") == 1
+    )
