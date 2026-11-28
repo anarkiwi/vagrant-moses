@@ -48,8 +48,7 @@ SENSITIVE = tuple(
 ENTRIES = ("cgen_init", "cgen_play")
 _SONG_STUB = {"x": 0xAA, "y": 0xA8}  # TAX, TAY
 
-#: The C64 host (unless ``CGEN_HOST`` is defined) and the driver API, after the lift.
-HOST = """
+_HOST = """
 #include "driver.h"
 
 #ifndef CGEN_HOST
@@ -58,10 +57,17 @@ uint8_t io_read(uint16_t a) { return *(volatile uint8_t *)a; }
 void io_write(uint16_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
 #endif
 
-void tune_init(uint8_t song) { cgen_init(song); }
+void tune_init(uint8_t song) { %s }
 
 void tune_play(void) { cgen_play(0); }
 """
+
+#: The C64 host (unless ``CGEN_HOST`` is defined) and the driver API, after the lift.
+HOST = _HOST % "cgen_init(song);"
+
+#: :data:`HOST` for a lift whose init is replayed (deity-informant's ``init=``): ``cgen_init``
+#: takes nothing, the program being one song's.
+HOST_REPLAYED = _HOST % "(void)song;\n  cgen_init();"
 
 
 #: The C64 ``trap``, its own translation unit: it stores ``k`` in ``cgen_trap`` and jams the
